@@ -1,9 +1,10 @@
 # %%
+from boxplot2d import plot_box_2d, animate_boxes, animate_boxes_with_blitting
 from memory_profiler import profile
 import numpy as np
-from box_embeddings.modules.volume import BesselApproxVolume
-from box_embeddings.modules.intersection import GumbelIntersection
-from box_embeddings.parameterizations import MinDeltaBoxTensor, SigmoidBoxTensor
+from box_embeddings.modules.volume import BesselApproxVolume, HardVolume, SoftVolume
+from box_embeddings.modules.intersection import GumbelIntersection, HardIntersection, Intersection
+from box_embeddings.parameterizations import MinDeltaBoxTensor, SigmoidBoxTensor, BoxTensor
 from box_embeddings.modules.regularization import L2SideBoxRegularizer
 from model import HeteroGNNGAT, HeteroGNNSAGE
 import pickle
@@ -23,7 +24,6 @@ from tqdm.auto import tqdm
 from box_forward import get_boxes_from_model_and_graph
 sys.path.append(os.path.join("/", "workspaces",
                 "kg-box-emb", "code", "presentation"))
-from boxplot2d import plot_box_2d, animate_boxes, animate_boxes_with_blitting
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -43,7 +43,12 @@ BOX_REGULARIZATION = 0.01
 # BOX_REGULARIZATION = 1000
 EPOCHS = 201
 NEG_WEIGHT = 0.1
+
+BOX_TRANSFORM_TYPE = 'mindelta'
 LOSS_TYPE = 'inclusion'
+INTERSECTION_TYPE = 'gumbel'
+INTER_TEMP = 0.01
+VOLUME_TYPE = 'bessel'
 SCALE_LOSSES = False
 
 
@@ -73,14 +78,20 @@ def box_loss(embeddings, gci0, loss_type='distance', box_transform='mindelta',
             box = MinDeltaBoxTensor
         case 'sigmoid':
             box = SigmoidBoxTensor
+        case 'standard':
+            box = BoxTensor
         case _:
             raise NotImplementedError()
+
+    if axiom_weights is None:
+        raise NotImplementedError()
+
     if loss_type == 'inclusion':
-        return box_loss_inclusion(embeddings, gci0, box=box, inter=inter,
+        return box_loss_inclusion(embeddings, gci0, axiom_weights=axiom_weights, box=box, inter=inter,
                                   inter_temp=inter_temp, vol=vol,
                                   vol_temp=vol_temp, neg_data=neg_data, neg=neg)
     if loss_type == 'distance':
-        return box_loss_distance(embeddings, gci0, box=box, gamma=gamma,
+        return box_loss_distance(embeddings, gci0, axiom_weights=axiom_weights, box=box, gamma=gamma,
                                  neg_data=neg_data, neg=neg)
     pass
 
@@ -88,10 +99,21 @@ def box_loss(embeddings, gci0, loss_type='distance', box_transform='mindelta',
 def box_loss_inclusion(embeddings, gci0, box=MinDeltaBoxTensor, inter='gumbel',
                        inter_temp=0.1, vol='bessel', vol_temp=0.1, neg_data=None,
                        neg=False, **kwargs):
-    def neg_loss_func(A, B, volume, intersect):
-        return (1 - (volume(intersect(A, B)) /
-                     torch.minimum(volume(A), volume(B)))).clamp(min=1e-9,
-                                                                 max=1).log().sum()
+
+    def neg_loss_func(A, B, volume, intersect, neg_data_weights=None):
+        # print(f"Volume of intersections:\n{volume(intersect(A, B))}")
+        # print(f"Volume of A:\n{volume(A)}")
+        # print(f"Volume of B:\n{volume(B)}")
+        try:
+            return (1 - (volume(intersect(A, B)) /
+                         torch.minimum(volume(A), volume(B)))).clamp(min=1e-9,
+                                                                     max=1).log().dot(
+                neg_data_weights
+            ).sum()
+        except (NameError, TypeError):
+            return (1 - (volume(intersect(A, B)) /
+                         torch.minimum(volume(A), volume(B)))).clamp(min=1e-9,
+                                                                     max=1).log().sum()
 
     # if neg or neg_data:
     #     raise NotImplementedError("Negative loss not yet implemented "
@@ -99,6 +121,10 @@ def box_loss_inclusion(embeddings, gci0, box=MinDeltaBoxTensor, inter='gumbel',
     match inter:
         case 'gumbel':
             intersect = GumbelIntersection(intersection_temperature=inter_temp)
+        case 'hard':
+            intersect = HardIntersection()
+        case 'standard':
+            intersect = Intersection()
         case _:
             raise NotImplementedError()
 
@@ -107,6 +133,10 @@ def box_loss_inclusion(embeddings, gci0, box=MinDeltaBoxTensor, inter='gumbel',
             volume = BesselApproxVolume(intersection_temperature=inter_temp,
                                         volume_temperature=vol_temp,
                                         log_scale=False)
+        case 'soft':
+            volume = SoftVolume(log_scale=False)
+        case 'hard':
+            volume = HardVolume(log_scale=False)
         case _:
             raise NotImplementedError()
 
@@ -123,7 +153,9 @@ def box_loss_inclusion(embeddings, gci0, box=MinDeltaBoxTensor, inter='gumbel',
             supclasses = box_emb[gci0[k][:, 1], ...]
 
             loss -= (volume(intersect(subclasses, supclasses)) /
-                     volume(subclasses)).clamp(min=1e-9, max=1).log().sum()
+                     volume(subclasses)).clamp(min=1e-9, max=1).log().dot(
+                         axiom_weights["gci0"][k]
+            ).sum()
             # print(volume(intersect(subclasses, supclasses)))
             # print(volume(subclasses))
             # print((volume(intersect(subclasses, supclasses)) /
@@ -160,18 +192,25 @@ def box_loss_inclusion(embeddings, gci0, box=MinDeltaBoxTensor, inter='gumbel',
                 A = box_emb[neg_data[k][:, 0], ...]
                 B = box_emb[neg_data[k][:, 1], ...]
 
-                neg_loss -= neg_loss_func(A, B, volume, intersect)
+                neg_loss -= neg_loss_func(A, B, volume, intersect,
+                                          neg_data_weights=axiom_weights["gci1_bot"][k])
 
     return loss, neg_loss
 
 
-def box_loss_distance(embeddings, gci0, box=MinDeltaBoxTensor, gamma=0.0,
+def box_loss_distance(embeddings, gci0, axiom_weights, box=MinDeltaBoxTensor, gamma=0.0,
                       neg_data=None, neg=False):
 
-    def dist_inclusion(sub_c, sub_o, sup_c, sup_o, neg=False):
+    def dist_inclusion(sub_c, sub_o, sup_c, sup_o, axiom_weights=None, neg=False):
         n = -1 if neg else 1
-        return torch.relu(n*(torch.abs(sub_c - sup_c) + sub_o - sup_o -
-                          gamma)).norm(dim=-1).sum()
+        try:
+            return torch.relu(n*(torch.abs(sub_c - sup_c) + sub_o - sup_o -
+                                 gamma)).norm(dim=-1).dot(
+                axiom_weights
+            ).sum()
+        except (NameError, TypeError):
+            return torch.relu(n*(torch.abs(sub_c - sup_c) + sub_o - sup_o -
+                                 gamma)).norm(dim=-1).sum()
     loss = 0
     neg_loss = 0
     for x_dict in embeddings:
@@ -185,7 +224,8 @@ def box_loss_distance(embeddings, gci0, box=MinDeltaBoxTensor, gamma=0.0,
             supclasses = box_emb[gci0[k][:, 1], ...]
             sup_c, sup_o = supclasses.centre, supclasses.Z - supclasses.centre
 
-            loss += dist_inclusion(sub_c, sub_o, sup_c, sup_o, neg=False)
+            loss += dist_inclusion(sub_c, sub_o, sup_c, sup_o,
+                                   axiom_weights=axiom_weights["gci0"][k], neg=False)
 
             if neg:
                 max_i = len(emb)
@@ -225,13 +265,22 @@ def box_loss_distance(embeddings, gci0, box=MinDeltaBoxTensor, gamma=0.0,
                 sup_o = supclasses.Z - supclasses.centre
 
                 neg_loss += dist_inclusion(sub_c,
-                                           sub_o, sup_c, sup_o, neg=True)
+                                           sub_o, sup_c, sup_o, axiom_weights=axiom_weights["gci1_bot"][k], neg=True)
 
     return loss, neg_loss
 
 
 box_regularizer = L2SideBoxRegularizer(weight=1.0, log_scale=False)
-box = MinDeltaBoxTensor
+# box = MinDeltaBoxTensor
+match BOX_TRANSFORM_TYPE:
+    case 'mindelta':
+        box = MinDeltaBoxTensor
+    case 'sigmoid':
+        box = SigmoidBoxTensor
+    case 'standard':
+        box = BoxTensor
+    case _:
+        raise NotImplementedError()
 
 
 def regularize_box(embeddings):
@@ -258,11 +307,15 @@ def small_box_penalty(embeddings):
 def train_boxes_OntologyGNN(
     graph,
     gci,
+    axiom_weights=None,
     gnn_channels=GNN_CHANNELS,
     lr=LR,
     lr_decay=LR_DECAY,
     epochs=EPOCHS,
+    box_transform_type=BOX_TRANSFORM_TYPE,
     loss_type=LOSS_TYPE,
+    intersection_type=INTERSECTION_TYPE,
+    volume_type=VOLUME_TYPE,
     regularization=REGULARIZATION,
     box_regularization=BOX_REGULARIZATION,
     neg_weight=NEG_WEIGHT,
@@ -275,12 +328,15 @@ GNN_CHANNELS: {gnn_channels}
 LR: {lr}
 LR_DECAY: {lr_decay}
 EPOCHS: {epochs}
+BOX_TRANSFORM_TYPE: {box_transform_type}
 LOSS_TYPE: {loss_type}
+INTERSECTION_TYPE: {intersection_type}
+VOLUME_TYPE: {volume_type}
 REGULARIZATION: {regularization}
 BOX_REGULARIZATION: {box_regularization}
 NEG_WEIGHT: {neg_weight}
 SCALE_LOSSES: {scale_losses}"""
-        )
+          )
     # model = HeteroGNNGAT(GNN_CHANNELS, graph.edge_types, graph.x_dict)
     # model = HeteroGNNSAGE(GNN_CHANNELS, graph.edge_types, graph.x_dict)
     model = OntologyGNN(gnn_channels, graph.edge_types, graph.x_dict)
@@ -295,6 +351,35 @@ SCALE_LOSSES: {scale_losses}"""
     boxes = []
     weights = [] if save_weights else None
     last_epoch = 0
+
+    if axiom_weights is None:
+        axiom_weights = {
+            "gci0": {k: torch.ones(size=(v.shape[0],)) for k, v in gci['gci0'].items()},
+            "gci1_bot": {k: torch.ones(size=(v.shape[0],)) for k, v in gci['gci1_bot'].items()} if gci['gci1_bot'] is not None else None
+        }
+    # if axiom_weights is None:
+    #     axiom_weights = {
+    #         "gci0" : {k: torch.zeros(size=(v.shape[0],)) for k,v in gci['gci0'].items()},
+    #         "gci1_bot" : {k: torch.zeros(size=(v.shape[0],)) for k,v in gci['gci1_bot'].items()} if gci['gci1_bot'] is not None else None
+    #     }
+
+    boost = 1000
+
+    for i, ax in enumerate(gci["gci0"]["classes"]):
+        if ax[0] < 6:
+            print(f"GCI0 Axiom: {ax} being boosted by a factor of {boost}!")
+            print(axiom_weights["gci0"]["classes"][i])
+            axiom_weights["gci0"]["classes"][i] *= boost
+            print(axiom_weights["gci0"]["classes"][i])
+
+    for i, ax in enumerate(gci["gci1_bot"]["classes"]):
+        if ax[0] < 6 and ax[1] < 6:
+            print(
+                f"GCI1 (BOT) Axiom: {ax} being boosted by a factor of {boost}!")
+            print(axiom_weights["gci1_bot"]["classes"][i])
+            axiom_weights["gci1_bot"]["classes"][i] *= boost
+            print(axiom_weights["gci1_bot"]["classes"][i])
+
     try:
         for epoch in range(epochs):
             optimizer.zero_grad()
@@ -303,7 +388,7 @@ SCALE_LOSSES: {scale_losses}"""
             x_dicts = [model(graph, return_embs=False)]
 
             pos_loss, neg_loss = box_loss(
-                x_dicts, gci['gci0'], loss_type=loss_type, neg_data=gci['gci1_bot'], neg=False)
+                x_dicts, gci['gci0'], axiom_weights=axiom_weights, loss_type=loss_type, neg_data=gci['gci1_bot'], neg=True, inter=INTERSECTION_TYPE, vol=VOLUME_TYPE)
             reg_loss = small_box_penalty(x_dicts)
             pos_ratio = torch.exp(-pos_loss / len(gci['gci0']['classes']))
             neg_ratio = 1 - \
@@ -359,29 +444,29 @@ SCALE_LOSSES: {scale_losses}"""
 
 if __name__ == "__main__":
 
-#     box_regs = [0, 1e-4, 1]
-#     neg_weights = [1e-2, 1e-1, 1]
-#     scales = [True, False]
-#     gnns = [[2*2], [16, 2*2]]
+    #     box_regs = [0, 1e-4, 1]
+    #     neg_weights = [1e-2, 1e-1, 1]
+    #     scales = [True, False]
+    #     gnns = [[2*2], [16, 2*2]]
 
-#     for br, neg, scale, g in tqdm(product(box_regs, neg_weights, scales, gnns)):
-#         BOX_REGULARIZATION = br
-#         NEG_WEIGHT = neg
-#         SCALE_LOSSES = scale
-#         GNN_CHANNELS = g
+    #     for br, neg, scale, g in tqdm(product(box_regs, neg_weights, scales, gnns)):
+    #         BOX_REGULARIZATION = br
+    #         NEG_WEIGHT = neg
+    #         SCALE_LOSSES = scale
+    #         GNN_CHANNELS = g
 
-#         print(f"""
+    #         print(f"""
 
-# GNN_CHANNELS: {GNN_CHANNELS}
-# LR: {LR}
-# LR_DECAY: {LR_DECAY}
-# EPOCHS: {EPOCHS}
-# LOSS_TYPE: {LOSS_TYPE}
-# REGULARIZATION: {REGULARIZATION}
-# BOX_REGULARIZATION: {BOX_REGULARIZATION}
-# NEG_WEIGHT: {NEG_WEIGHT}
-# SCALE_LOSSES: {SCALE_LOSSES}"""
-#         )
+    # GNN_CHANNELS: {GNN_CHANNELS}
+    # LR: {LR}
+    # LR_DECAY: {LR_DECAY}
+    # EPOCHS: {EPOCHS}
+    # LOSS_TYPE: {LOSS_TYPE}
+    # REGULARIZATION: {REGULARIZATION}
+    # BOX_REGULARIZATION: {BOX_REGULARIZATION}
+    # NEG_WEIGHT: {NEG_WEIGHT}
+    # SCALE_LOSSES: {SCALE_LOSSES}"""
+    #         )
 
     # %%
     BASE = os.path.dirname(os.path.dirname(
@@ -394,7 +479,7 @@ if __name__ == "__main__":
     pprint(graph.edge_types)
     gci = data['gci']
     gci = {k: {kk: vv.to(device) for kk, vv in v.items()}
-        for k, v in gci.items()}
+           for k, v in gci.items()}
     # graph['classes'].node_id = torch.arange(len(graph['classes'].x))
     # %%
 
@@ -409,7 +494,10 @@ if __name__ == "__main__":
     # Save the hyperparameters and training information to a text file
     with open(os.path.join(output_dir, 'training_info.txt'), 'w') as fo:
         fo.write(f"Ontology source: {data['source_ontology']}\n")
+        fo.write(f"Box Transform type: {BOX_TRANSFORM_TYPE}\n")
         fo.write(f"Loss type: {LOSS_TYPE}\n")
+        fo.write(f"Intersection type: {INTERSECTION_TYPE}\n")
+        fo.write(f"Volume type: {VOLUME_TYPE}\n")
         fo.write(f"Epochs: {EPOCHS}\n")
         fo.write(f"Learning rate: {LR}\n")
         fo.write(f"Learning rate decay: {LR_DECAY}\n")
@@ -448,7 +536,7 @@ if __name__ == "__main__":
     # Get boxes and losses
     boxes_epochs = np.stack([b[0] for b in boxes])
     be_dict = {i: boxes_epochs[:, i, :, :]
-            for i in range(boxes_epochs.shape[1])}
+               for i in range(boxes_epochs.shape[1])}
     # print([[t for t in b[1:]] for b in boxes])
     losses = np.array([b[1:] for b in boxes])
 
@@ -463,11 +551,13 @@ if __name__ == "__main__":
 
     animate_boxes_with_blitting(be_dict, losses, save=True, fp=os.path.join(
         output_dir, 'training.mp4'),
-        box_filter=lambda k: k in true_classes,
+        box_filter=lambda k: k in true_classes or rev_class_dict[k].startswith(
+            "http://www.w3.org/2002/07/owl#"),
         # box_filter=lambda k: k in plot_classes,
         # box_filter=lambda k: True,
-        box_filter_type='omit',
+        box_filter_type='bold',
         box_labels=rev_class_dict,
-        box_label_filter=lambda k: k in true_classes
+        box_label_filter=lambda k: k in true_classes or rev_class_dict[k].startswith(
+            "http://www.w3.org/2002/07/owl#")
         # box_label_filter=lambda k: k in plot_classes
     )
