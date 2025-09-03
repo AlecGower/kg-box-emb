@@ -385,6 +385,17 @@ def small_box_penalty(embeddings):
     return loss
 
 
+def distance_from_origin_penalty(embeddings):
+    loss = 0
+    for x_dict in embeddings:
+        for emb in x_dict.values():
+            box_emb = box.from_vector(emb)
+            box_dists = torch.norm(box_emb.Z, dim=-1)
+            # print(box_sizes)
+            loss += box_dists.sum()
+    return loss
+
+
 # @profile
 def train_boxes_OntologyGNN(
     graph,
@@ -448,10 +459,12 @@ SCALE_LOSSES: {scale_losses}"""
                 neg_random_weight=neg_random_weight,
                 neg_classes_to_skip=neg_classes_to_skip,
             )
-            if box_regularization > 0.0:
-                reg_loss = small_box_penalty(x_dicts)
-            else:
+            reg_loss_act = small_box_penalty(x_dicts)
+            if box_regularization == 0.0:
                 reg_loss = torch.tensor(0.0)
+            else:
+                reg_loss = reg_loss_act
+
             pos_loss_scaled = pos_loss / len(gci["gci0"]["classes"])
             neg_loss_scaled = neg_loss / (
                 3 * len(gci["gci0"]["classes"]) + len(gci["gci1_bot"]["classes"])
@@ -466,17 +479,21 @@ SCALE_LOSSES: {scale_losses}"""
                 )
             else:
                 loss = pos_loss + neg_weight * neg_loss + box_regularization * reg_loss
+
+            if loss_type == "distance":
+                dist_reg_loss = distance_from_origin_penalty(x_dicts)
+                # loss += dist_reg_loss
             # loss = neg_loss
             # loss = 1 - pos_ratio + neg_weight * neg_ratio + box_regularization * reg_loss
             total_loss = loss.detach().item()
 
             if loss_type == "distance":
                 print(
-                    f"Epoch: {epoch}, total loss: {total_loss:.4g}, pos loss: {pos_loss:.6g}, neg loss: {neg_loss:.6g}, reg: {reg_loss:.3g}"
+                    f"Epoch: {epoch}, total loss: {total_loss:.4g}, pos loss: {pos_loss:.6g}, neg loss: {neg_loss:.6g}, reg: {reg_loss_act:.3g}, dist_reg: {dist_reg_loss:.2g}"
                 )
             else:
                 print(
-                    f"Epoch: {epoch}, total loss: {total_loss:.4g}, pos ratio: {pos_ratio:.6g}, neg ratio: {neg_ratio:.6g}, reg: {reg_loss:.8g}"
+                    f"Epoch: {epoch}, total loss: {total_loss:.4g}, pos ratio: {pos_ratio:.6g}, neg ratio: {neg_ratio:.6g}, reg: {reg_loss_act:.8g}"
                 )
 
             # Backpropagate loss gradients
