@@ -13,9 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN mkdir -p /var/cache/apt/archives /var/cache/apt/archives/partial \
     && chmod -R 755 /var/cache/apt/archives \
     # Temporarily neutralize any APT::Update::Post-Invoke hooks that may fail in minimal environments
-    && printf 'APT::Update::Post-Invoke { "true"; };
-APT::Update::Post-Invoke-Success { "true"; };
-' > /etc/apt/apt.conf.d/99no-postinvoke
+    && printf 'APT::Update::Post-Invoke { "true"; }; APT::Update::Post-Invoke-Success { "true"; };' > /etc/apt/apt.conf.d/99no-postinvoke
 
 # Install small set of system dependencies + OpenJDK 11
 RUN apt-get update -y \
