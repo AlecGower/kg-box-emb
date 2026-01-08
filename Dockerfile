@@ -28,8 +28,9 @@ RUN apt-get update -y \
 # Set JAVA_HOME for tools that need it
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 
-# Upgrade pip and install wheel/setuptools
-RUN python -m pip install --upgrade pip setuptools wheel
+# Upgrade pip and install wheel/setuptools (disable progress bar to avoid thread-start error in constrained build env)
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN python -m pip install --upgrade pip setuptools wheel --progress-bar off --no-cache-dir
 
 # Create an unprivileged user for running the app
 RUN useradd --create-home --shell /bin/bash app
