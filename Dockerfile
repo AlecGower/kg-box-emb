@@ -2,32 +2,32 @@
 # Based on Python slim image (Debian Bookworm) to keep the image small
 # Installs OpenJDK 11 and project requirements
 
-FROM python:3.10-slim-bookworm
+FROM python:3.10-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/home/app/.local/bin:${PATH}"
 
-# Ensure apt cache directories exist and are writable to avoid APT post-invoke failures
-RUN mkdir -p /var/cache/apt/archives /var/cache/apt/archives/partial \
-    && chmod -R 755 /var/cache/apt/archives
+# # Ensure apt cache directories exist and are writable to avoid APT post-invoke failures
+# RUN mkdir -p /var/cache/apt/archives /var/cache/apt/archives/partial \
+#     && chmod -R 755 /var/cache/apt/archives
+# 
+# # Install small set of system dependencies + OpenJDK 11
+# # Use -o flags to override any APT::Update::Post-Invoke hooks for this invocation
+# RUN apt-get update -y \
+#     && apt-get install -y --no-install-recommends \
+#         build-essential \
+#         git \
+#         wget \
+#         ca-certificates \
+#         openjdk-11-jdk-headless \
+#         libffi-dev \
+#         libssl-dev \
+#     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true
 
-# Install small set of system dependencies + OpenJDK 11
-# Use -o flags to override any APT::Update::Post-Invoke hooks for this invocation
-RUN apt-get update -y -o APT::Update::Post-Invoke='true' -o APT::Update::Post-Invoke-Success='true' \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        git \
-        wget \
-        ca-certificates \
-        openjdk-11-jdk-headless \
-        libffi-dev \
-        libssl-dev \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true
-
-# Set JAVA_HOME for tools that need it
-ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+# # Set JAVA_HOME for tools that need it
+# ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 
 # Upgrade pip and install wheel/setuptools (disable progress bar to avoid thread-start error in constrained build env)
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
