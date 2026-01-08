@@ -11,12 +11,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Ensure apt cache directories exist and are writable to avoid APT post-invoke failures
 RUN mkdir -p /var/cache/apt/archives /var/cache/apt/archives/partial \
-    && chmod -R 755 /var/cache/apt/archives \
-    # Temporarily neutralize any APT::Update::Post-Invoke hooks that may fail in minimal environments
-    && printf 'APT::Update::Post-Invoke { "true"; }; APT::Update::Post-Invoke-Success { "true"; };' > /etc/apt/apt.conf.d/99no-postinvoke
+    && chmod -R 755 /var/cache/apt/archives
 
 # Install small set of system dependencies + OpenJDK 11
-RUN apt-get update -y \
+# Use -o flags to override any APT::Update::Post-Invoke hooks for this invocation
+RUN apt-get update -y -o APT::Update::Post-Invoke='true' -o APT::Update::Post-Invoke-Success='true' \
     && apt-get install -y --no-install-recommends \
         build-essential \
         git \
@@ -25,8 +24,7 @@ RUN apt-get update -y \
         openjdk-11-jdk-headless \
         libffi-dev \
         libssl-dev \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true \
-    && rm -f /etc/apt/apt.conf.d/99no-postinvoke || true
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true
 
 # Set JAVA_HOME for tools that need it
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
