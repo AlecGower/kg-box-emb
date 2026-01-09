@@ -12,6 +12,8 @@ import rdflib
 from rdflib.plugins.stores import sparqlstore
 from rdflib.namespace import OWL, RDF, RDFS
 
+import pyoxigraph as pox
+
 USED_GCI = ["gci0", "gci2", "gci1_bot"]
 prefix = """PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -64,8 +66,10 @@ def get_queries(a, b, merged_assertions=True):
 
 
 def get_bots(gci1_bot, i2c, c2i, full_fp, merged_assertions=True):
-    kg = rdflib.Graph()
-    kg.parse(full_fp)
+    kg_store = pox.Store("/tmp/pyoxigraph_store_bots")
+    kg_store.bulk_load(path=full_fp, format=pox.RdfFormat.TURTLE)
+    # kg = rdflib.Graph()
+    # kg.parse(full_fp)
     new_bots = set()
     for i, tensor_pair in enumerate(gci1_bot[:, :2]):
         print(f"{i} of {len(gci1_bot)} completed...", end="\r")
@@ -76,9 +80,11 @@ def get_bots(gci1_bot, i2c, c2i, full_fp, merged_assertions=True):
 
             queries = get_queries(a, b, merged_assertions=merged_assertions)
             for q in queries:
-                res = kg.query(q)
+                res = kg_store.query(q)
+                # res = kg.query(q)
                 for r in res:
-                    bot_pair = tuple(sorted([c2i[str(r[0])], c2i[str(r[1])]]))
+                    bot_pair = tuple(sorted([c2i[str(r[0].value)], c2i[str(r[1].value)]]))
+                    # bot_pair = tuple(sorted([c2i[str(r[0])], c2i[str(r[1])]]))
                     new_bots.add(bot_pair)
         print(f"{i+1} of {len(gci1_bot)} completed...", end="\r")
 
