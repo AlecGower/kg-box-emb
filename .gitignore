@@ -307,10 +307,8 @@ datasets/box_graph.pkl
 datasets-old
 
 .DS_Store
-datasets/box_graph_all.pkl
-datasets/box_graph-royals-extended-4.5613583.pkl
-datasets/box_graph.5613532.pkl
-datasets/box_graph.5613533.pkl
-datasets/box_graph.5613535.pkl
-datasets/pyg_graph_box_interactions_DMA30_reduced.pkl
-datasets/royals.pkl
+mprofile_20260109062444.dat
+*.dat
+*.pkl
+code/scratchpad/
+final_boxes.pdf
