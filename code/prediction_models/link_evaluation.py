@@ -24,7 +24,7 @@ import time
 
 # Set maximum number of test edges to evaluate
 MAX_TEST_EDGES = -1  # Set to -1 for all edges
-MAX_TEST_EDGES_PER_TYPE = 100  # Set to -1 for all edges
+MAX_TEST_EDGES_PER_TYPE = 500  # Set to -1 for all edges
 MAX_EDGE_TYPES = -1  # Set to -1 for all edge types
 
 # Constants
@@ -36,10 +36,10 @@ LR = 0.05
 LR_DECAY = 0.000
 REGULARIZATION = 0
 BOX_REGULARIZATION = 0.000
-EPOCHS = 1000
+EPOCHS = 600
 NEG_WEIGHT = 0.5
 NEG_RANDOM_WEIGHT = 0.1
-LOSS_TYPE = "distance"
+LOSS_TYPE = "inclusion"
 SCALE_LOSSES = False
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

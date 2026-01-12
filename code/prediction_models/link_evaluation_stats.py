@@ -60,3 +60,38 @@ dfdata.extend([('random', t, d)
 
 df = pd.DataFrame(dfdata, columns=["source", "edgeType", "distance"])
 
+# Plot box plots for distributions for each edge type
+plt.figure(figsize=(24, 24))
+sns.set(style="whitegrid")
+# Smaller circles for outliers
+sns.boxplot(x="edgeType", y="distance", hue="source", data=df, fliersize=2)
+plt.title("Link Distance Distributions by Edge Type")
+plt.xlabel("Edge Type")
+# Rotated x-axis labels to vertical for better readability
+plt.xticks(rotation=90)
+plt.ylabel("Distance")
+plt.legend(title="Source")
+plt.tight_layout()
+plt.savefig(os.path.join(link_eval_dir, "link_distance_distributions.png"))
+plt.close()
+
+# Different figure which is essentialy the same but each box
+# gets its own subplot for better visibility
+
+# Create figure with subplots
+num_edge_types = len(df['edgeType'].unique())
+fig, axes = plt.subplots(num_edge_types, 1, figsize=(8, num_edge_types * 4), sharex=True)
+sns.set(style="whitegrid")
+for ax, (edge_type, group_data) in zip(axes, df.groupby('edgeType')):
+    sns.boxplot(x="source", y="distance", hue="source", data=group_data, fliersize=2, ax=ax)
+    ax.set_title(f"Link Distance Distribution for Edge Type: {edge_type}")
+    ax.set_xlabel("Source")
+    ax.set_ylabel("Distance")
+    # Create a legend only for the first subplot
+    if ax == axes[0]:
+        plt.legend(title="Source")
+    else:
+        ax.get_legend().remove()
+plt.tight_layout()
+plt.savefig(os.path.join(link_eval_dir, "link_distance_distributions_separate.png"))
+plt.close()
