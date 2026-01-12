@@ -12,19 +12,34 @@ from torch_geometric import seed_everything
 from sklearn.model_selection import train_test_split
 from box_embeddings.parameterizations import MinDeltaBoxTensor
 from train_boxes import train_boxes_OntologyGNN, box_loss
+from itertools import islice
+import argparse
+import json
+import threading
+import time
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import time
+
+# Set maximum number of test edges to evaluate
+MAX_TEST_EDGES = -1  # Set to -1 for all edges
+MAX_TEST_EDGES_PER_TYPE = 100  # Set to -1 for all edges
+MAX_EDGE_TYPES = -1  # Set to -1 for all edge types
 
 # Constants
 BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-GNN_CHANNELS = [8, 8, 8, 8]
+# GNN_CHANNELS = [16, 16]
+GNN_CHANNELS = [64]
 # GNN_CHANNELS = [2 * 2]
-LR = 5e-1
-LR_DECAY = 0.001
+LR = 0.05
+LR_DECAY = 0.000
 REGULARIZATION = 0
 BOX_REGULARIZATION = 0.000
-EPOCHS = 501
+EPOCHS = 1000
 NEG_WEIGHT = 0.5
-NEG_RANDOM_WEIGHT = 1
-LOSS_TYPE = "inclusion"
+NEG_RANDOM_WEIGHT = 0.1
+LOSS_TYPE = "distance"
 SCALE_LOSSES = False
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -33,10 +48,33 @@ torch.manual_seed(42)
 # Enable detect anomaly mode
 torch.autograd.set_detect_anomaly(True)
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--shard-id", type=int, default=0)
+parser.add_argument("--num-shards", type=int, default=1)
+parser.add_argument("--output-dir", type=str, default=None)
+parser.add_argument("--workers", type=int, default=1, help="Number of worker threads for inference; keep 1 for safety on GPU")
+parser.add_argument("--results-log", type=str, default=None, help="Path to append JSONL results; defaults to output_dir/link_eval_results.jsonl")
+parser.add_argument("--flush-every", type=int, default=1, help="Flush results to disk every N edges")
+parser.add_argument("--no-deepcopy", action="store_true", help="Avoid deepcopy of G_train; modify edge_index in-place with restore (faster)")
+args = parser.parse_args()
+SHARD_ID = args.shard_id
+NUM_SHARDS = args.num_shards
+WORKERS = args.workers
+# Enforce a single worker for now (safe and avoids GPU contention); clamp and warn if user requested >1
+if WORKERS is None:
+    WORKERS = 1
+elif WORKERS > 1:
+    print(f"Warning: forcing --workers to 1 (requested {args.workers}) to avoid GPU contention.", file=sys.stderr)
+    WORKERS = 1
+RESULTS_LOG = args.results_log
+FLUSH_EVERY = args.flush_every
+NO_DEEPCOPY = args.no_deepcopy
+# use args.output_dir / args.checkpoint_dir if provided
+
 
 # Define functions
 def load_graph():
-    with open(os.path.join(BASE, "datasets/box_graph.pkl"), "rb") as fi:
+    with open(os.path.join(BASE, "datasets/box_graph_all.pkl"), "rb") as fi:
         data = pickle.load(fi)
     graph = data["graph"].to(DEVICE)
     rev_class_dict = data["rev_class_dict"]
@@ -47,12 +85,32 @@ def load_graph():
     return graph, gci, data, rev_class_dict, rev_rel_dict
 
 
-def graph_train_test_split(G, ratio=0.7):
+def graph_train_test_split(G, ratio=0.8):
     G_train, G_test = deepcopy(G), deepcopy(G)
-    for edge_type, edge_details in G.edge_items():
+    for edge_i, (edge_type, edge_details) in enumerate(G.edge_items()):
+        if len(edge_details["edge_index"].T) < MAX_TEST_EDGES_PER_TYPE:
+            print(
+                f"Skipping edge type {edge_type} with only {len(edge_details['edge_index'].T)} edges", file=sys.stderr
+            )
+            del G_train[edge_type]
+            del G_test[edge_type]
+            continue
+        if edge_i > MAX_EDGE_TYPES and MAX_EDGE_TYPES > 0:
+            print(
+                f"Skipping edge type {edge_type} beyond max edge types {MAX_EDGE_TYPES}",
+                file=sys.stderr,
+            )
+            del G_train[edge_type]
+            del G_test[edge_type]
+            continue
         train, test = train_test_split(
             edge_details["edge_index"].T, random_state=42, test_size=1 - ratio
         )
+        # Only include MAX_TEST_EDGES_PER_TYPE in test set
+        print(test.shape, file=sys.stderr)
+        if MAX_TEST_EDGES_PER_TYPE > 0:
+            test = test[:MAX_TEST_EDGES_PER_TYPE, :]
+        print(test.shape, file=sys.stderr)
         G_train[edge_type]["edge_index"] = train.T
         G_test[edge_type]["edge_index"] = test.T
         assert (
@@ -95,7 +153,7 @@ def train_and_save_model(
         fo.write(f"Epochs completed: {stop_epoch + 1} of planned {EPOCHS} epochs")
 
     # Save the model to a file
-    print(f"Saving model to {output_dir}")
+    print(f"Saving model to {output_dir}", file=sys.stderr)
 
     # Save the model and graph to a pickle file
     with open(os.path.join(output_dir, "box_model.pkl"), "wb") as fo:
@@ -148,7 +206,7 @@ def get_superclass(subclass, gci, person=False):
 def get_random_subclass(superclass, gci):
     return choice(
         gci["gci0"]["classes"][gci["gci0"]["classes"][:, 1] == superclass][:, 0]
-        .detach()
+        .detach().to('cpu')
         .numpy()
     )
 
@@ -156,7 +214,7 @@ def get_random_subclass(superclass, gci):
 if __name__ == "__main__":
     # Load graph and find "true classes"
     G, gci, data, rev_class_dict, rev_rel_dict = load_graph()
-    true_classes = set(gci["gci0"]["classes"][:, 1].detach().numpy())
+    true_classes = set(gci["gci0"]["classes"][:, 1].detach().to('cpu').numpy())
 
     # Create an output directory if it doesn't exist
     # with current date and time in the directory name
@@ -204,39 +262,78 @@ if __name__ == "__main__":
     G_train, G_test = graph_train_test_split(G)
 
     # 2. Train embedding parameters using G
+    print("Training base model using G_train...", file=sys.stderr)
     model, boxes, stop_epoch, weights = train_and_save_model(
         G_train, gci, true_classes, output_dir
     )
+    # Ensure model is on the same device as the graph to avoid device mismatch errors
+    try:
+        model.to(DEVICE)
+        model.eval()
+    except Exception as e:
+        print(f"Warning: failed to move model to {DEVICE}: {e}", file=sys.stderr)
+
     # 3. Calculate embeddings B from G using trained parameters
     B, x_dicts_orig = box_embeddings_from_model(model, G_train, box=MinDeltaBoxTensor)
     B_full, x_dicts_full = box_embeddings_from_model(model, G, box=MinDeltaBoxTensor)
-    print(f"Total distance from G_train to G: {embedding_distance(B, B_full)}")
-    # 4. distances = {}
-    distances = {}
-    random_distances = {}
-    constrained_random_distances = {}
-    i = 0
-    # 5. For each edge, e, in E':
-    for edge_type, edge_details in tqdm(G_test.edge_items()):
-        if edge_type[1].startswith("rev_"):
-            continue
-        for source, target in tqdm(edge_details["edge_index"].T):
-            # 6.   Create graph G*:=(V,E u {e})
-            G_star = deepcopy(G_train)
-            # TODO Also add rev_* edge
-            G_star[edge_type]["edge_index"] = torch.cat(
-                [G_star[edge_type]["edge_index"], torch.tensor([[source, target]]).T],
-                dim=1,
-            )
-            # 6. Also random
-            G_rand = deepcopy(G_train)
+    print(f"Total distance from G_train to G: {embedding_distance(B, B_full)}", file=sys.stderr)
+    # Stream out results to a JSONL file (append) to avoid keeping everything in memory
+    if args.output_dir:
+        output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+    results_log = RESULTS_LOG if RESULTS_LOG else os.path.join(output_dir, "link_eval_results.jsonl")
+
+    write_lock = threading.Lock()
+    write_counter = {"n": 0}
+    results_fp = open(results_log, "a", buffering=1)
+
+    def _write_result(d):
+        s = json.dumps(d)
+        with write_lock:
+            results_fp.write(s + "\n")
+            write_counter["n"] += 1
+            if write_counter["n"] % FLUSH_EVERY == 0:
+                try:
+                    results_fp.flush()
+                    os.fsync(results_fp.fileno())
+                except Exception:
+                    pass
+
+    # single-edge processing (no grad)
+    def _process_edge(idx, edge_type, source, target):
+        with torch.no_grad():
+            dev = G_train[edge_type]["edge_index"].device
+            new_idx = torch.stack([source, target]).unsqueeze(1).to(dev)
+
+            # Test edge
+            if NO_DEEPCOPY:
+                old_idx = G_train[edge_type]["edge_index"]
+                G_train[edge_type]["edge_index"] = torch.cat([old_idx, new_idx], dim=1)
+                try:
+                    B_star, x_dicts_star = box_embeddings_from_model(model, G_train, box=MinDeltaBoxTensor)
+                finally:
+                    G_train[edge_type]["edge_index"] = old_idx
+            else:
+                G_star = deepcopy(G_train)
+                G_star[edge_type]["edge_index"] = torch.cat([G_star[edge_type]["edge_index"], new_idx], dim=1)
+                B_star, x_dicts_star = box_embeddings_from_model(model, G_star, box=MinDeltaBoxTensor)
+
+            # Random edge
             rs, rt = sample(range(len(rev_class_dict)), k=2)
-            G_rand[edge_type]["edge_index"] = torch.cat(
-                [G_rand[edge_type]["edge_index"], torch.tensor([[rs, rt]]).T],
-                dim=1,
-            )
-            # 6. Also constrained random
-            G_crand = deepcopy(G_train)
+            rand_idx = torch.tensor([[rs, rt]], device=dev).T
+            if NO_DEEPCOPY:
+                old_idx = G_train[edge_type]["edge_index"]
+                G_train[edge_type]["edge_index"] = torch.cat([old_idx, rand_idx], dim=1)
+                try:
+                    B_rand, x_dicts_rand = box_embeddings_from_model(model, G_train, box=MinDeltaBoxTensor)
+                finally:
+                    G_train[edge_type]["edge_index"] = old_idx
+            else:
+                G_rand = deepcopy(G_train)
+                G_rand[edge_type]["edge_index"] = torch.cat([G_rand[edge_type]["edge_index"], rand_idx], dim=1)
+                B_rand, x_dicts_rand = box_embeddings_from_model(model, G_rand, box=MinDeltaBoxTensor)
+
+            # Constrained random
             crs = get_random_subclass(get_superclass(source, gci), gci)
             crt = get_random_subclass(
                 get_superclass(
@@ -246,105 +343,105 @@ if __name__ == "__main__":
                 ),
                 gci,
             )
-            G_crand[edge_type]["edge_index"] = torch.cat(
-                [G_crand[edge_type]["edge_index"], torch.tensor([[crs, crt]]).T],
-                dim=1,
-            )
-            # 7.   calculate embeddings B* from G* using trained parameters
-            B_star, x_dicts_star = box_embeddings_from_model(
-                model, G_star, box=MinDeltaBoxTensor
-            )
-            B_rand, x_dicts_rand = box_embeddings_from_model(
-                model, G_rand, box=MinDeltaBoxTensor
-            )
-            B_crand, x_dicts_crand = box_embeddings_from_model(
-                model, G_crand, box=MinDeltaBoxTensor
-            )
-            # 8.   Set distance dist:=0
-            # 9.   For v in V:
-            # 10.    b:=B(v), b*=B*(v)
-            # 11.    dist:= dist + 〈b,b*〉
-            # 12.  distances[e]:= dist
-            distances[(edge_type, source.detach().item(), target.detach().item())] = (
-                dict(
-                    zip(
-                        ["distance", "pos_loss", "neg_loss"],
-                        (
-                            embedding_distance(B, B_star).detach().item(),
-                            *[
-                                l.detach().item()
-                                for l in box_loss(
-                                    x_dicts_star,
-                                    gci["gci0"],
-                                    loss_type=LOSS_TYPE,
-                                    neg=True,
-                                    neg_data=gci["gci1_bot"],
-                                    neg_random_weight=0,
-                                )
-                            ],
-                        ),
-                    )
-                )
-            )
-            # print(
-            #     f"From test: {(edge_type, source, target)}: {distances[(edge_type, source, target)]}"
-            # )
-            random_distances[(edge_type, rs, rt)] = dict(
-                zip(
-                    ["distance", "pos_loss", "neg_loss"],
-                    (
-                        embedding_distance(B, B_rand).detach().item(),
-                        *[
-                            l.detach().item()
-                            for l in box_loss(
-                                x_dicts_rand,
-                                gci["gci0"],
-                                loss_type=LOSS_TYPE,
-                                neg=True,
-                                neg_data=gci["gci1_bot"],
-                                neg_random_weight=0,
-                            )
-                        ],
-                    ),
-                )
-            )
-            # print(
-            #     f"Random:    {(edge_type, rs, rt)}: {random_distances[(edge_type, rs, rt)]}"
-            # )
-            constrained_random_distances[(edge_type, crs, crt)] = dict(
-                zip(
-                    ["distance", "pos_loss", "neg_loss"],
-                    (
-                        embedding_distance(B, B_crand).detach().item(),
-                        *[
-                            l.detach().item()
-                            for l in box_loss(
-                                x_dicts_crand,
-                                gci["gci0"],
-                                loss_type=LOSS_TYPE,
-                                neg=True,
-                                neg_data=gci["gci1_bot"],
-                                neg_random_weight=0,
-                            )
-                        ],
-                    ),
-                )
-            )
-            # print(
-            #     f"Random:    {(edge_type, rs, rt)}: {random_distances[(edge_type, rs, rt)]}"
-            # )
-            i += 1
-            # print(
-            #     f"Mean test distance ({i:>3}): {np.mean(list(distances.values())):.5f};  Mean random distance ({i:>3}): {np.mean(list(random_distances.values())):.5f}; Mean constr. random distance ({i:>3}): {np.mean(list(constrained_random_distances.values())):.5f}",
-            #     end="\n",
-            # )
+            crand_idx = torch.tensor([[crs, crt]], device=dev).T
+            if NO_DEEPCOPY:
+                old_idx = G_train[edge_type]["edge_index"]
+                G_train[edge_type]["edge_index"] = torch.cat([old_idx, crand_idx], dim=1)
+                try:
+                    B_crand, x_dicts_crand = box_embeddings_from_model(model, G_train, box=MinDeltaBoxTensor)
+                finally:
+                    G_train[edge_type]["edge_index"] = old_idx
+            else:
+                G_crand = deepcopy(G_train)
+                G_crand[edge_type]["edge_index"] = torch.cat([G_crand[edge_type]["edge_index"], crand_idx], dim=1)
+                B_crand, x_dicts_crand = box_embeddings_from_model(model, G_crand, box=MinDeltaBoxTensor)
 
-        with open(os.path.join(output_dir, "link_eval_data.pkl"), "wb") as fo:
-            pickle.dump(
-                {
-                    "distances": distances,
-                    "random_distances": random_distances,
-                    "constrained_random_distances": constrained_random_distances,
-                },
-                fo,
-            )
+            # make sure GPU work is finished before moving to CPU
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+
+            # compute metrics
+            dist_val = embedding_distance(B, B_star).detach().item()
+            pos_neg = [l.detach().item() for l in box_loss(x_dicts_star, gci["gci0"], loss_type=LOSS_TYPE, neg=True, neg_data=gci["gci1_bot"], neg_random_weight=0)]
+            rand_val = embedding_distance(B, B_rand).detach().item()
+            rand_pos_neg = [l.detach().item() for l in box_loss(x_dicts_rand, gci["gci0"], loss_type=LOSS_TYPE, neg=True, neg_data=gci["gci1_bot"], neg_random_weight=0)]
+            crand_val = embedding_distance(B, B_crand).detach().item()
+            crand_pos_neg = [l.detach().item() for l in box_loss(x_dicts_crand, gci["gci0"], loss_type=LOSS_TYPE, neg=True, neg_data=gci["gci1_bot"], neg_random_weight=0)]
+
+            out = {
+                "idx": idx,
+                "edge": [str(edge_type[0]), str(edge_type[1]), int(source.detach().item()), int(target.detach().item())],
+                "distance": [dist_val] + pos_neg,
+                "random_edge": [int(rs), int(rt)],
+                "random": [rand_val] + rand_pos_neg,
+                "constrained_edge": [int(crs), int(crt)],
+                "constrained_random": [crand_val] + crand_pos_neg,
+                "timestamp": time.time(),
+                "shard": SHARD_ID,
+            }
+            _write_result(out)
+
+    # collect edges
+    edges = []
+    for edge_type, edge_details in tqdm(G_test.edge_items(), desc="Collecting test edges", file=sys.stderr):
+        if edge_type[1].startswith("rev_"): continue
+        for s, t in edge_details["edge_index"].T:
+            edges.append((edge_type, s, t))
+
+    # process sequentially (workers clamped to 1)
+    processed = 0
+    for idx, (edge_type, source, target) in tqdm(
+        enumerate(edges),
+        desc="Processing test edges",
+        total=len(edges) if MAX_TEST_EDGES < 0 else min(MAX_TEST_EDGES, len(edges)),
+        file=sys.stderr
+    ):
+        if idx % NUM_SHARDS != SHARD_ID:
+            continue
+        if processed >= MAX_TEST_EDGES and MAX_TEST_EDGES > 0:
+            break
+        try:
+            _process_edge(idx, edge_type, source, target)
+        except Exception as e:
+            print(f"Error processing edge {idx}: {e}", file=sys.stderr)
+        processed += 1
+
+    # close results file
+    try:
+        results_fp.flush()
+        os.fsync(results_fp.fileno())
+    except Exception:
+        pass
+    results_fp.close()
+
+    # Aggregate JSONL results into final pickle (small memory usage at the end)
+    distances = {}
+    random_distances = {}
+    constrained_random_distances = {}
+    with open(results_log, "r") as fi:
+        for line in fi:
+            try:
+                d = json.loads(line)
+                et = (d["edge"][0], d["edge"][1])
+                s = d["edge"][2]
+                t = d["edge"][3]
+                distances[(et, s, t)] = dict(zip(["distance", "pos_loss", "neg_loss"], d["distance"]))
+                re = d["random_edge"]
+                random_distances[(et, re[0], re[1])] = dict(zip(["distance", "pos_loss", "neg_loss"], d["random"]))
+                cre = d["constrained_edge"]
+                constrained_random_distances[(et, cre[0], cre[1])] = dict(zip(["distance", "pos_loss", "neg_loss"], d["constrained_random"]))
+            except Exception as e:
+                print(f"Failed to parse result line: {e}", file=sys.stderr)
+
+    with open(os.path.join(output_dir, "link_eval_data.pkl"), "wb") as fo:
+        pickle.dump(
+            {
+                "distances": distances,
+                "random_distances": random_distances,
+                "constrained_random_distances": constrained_random_distances,
+            },
+            fo,
+        )

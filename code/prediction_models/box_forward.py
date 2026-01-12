@@ -6,7 +6,7 @@ import os
 import sys
 from matplotlib import pyplot as plt
 
-sys.path.append(os.path.join("/", "workspaces", "kg-box-emb", "code", "presentation"))
+sys.path.append(os.path.join(os.getcwd(), "..", "presentation"))
 from boxplot2d import plot_box_2d
 
 device = "cuda" if torch.cuda.is_available() else "cpu"

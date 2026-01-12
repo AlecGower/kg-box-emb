@@ -27,7 +27,8 @@ from tqdm.auto import tqdm
 
 from box_forward import get_boxes_from_model_and_graph, get_initial_boxes_from_model
 
-sys.path.append(os.path.join("/", "workspaces", "kg-box-emb", "code", "presentation"))
+BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.join(BASE, "code", "presentation"))
 from boxplot2d import (
     plot_box_2d,
     plot_min_delta_boxes_2d_matplotlib,
@@ -47,7 +48,7 @@ torch.autograd.set_detect_anomaly(True)
 # %%
 GNN_CHANNELS = [2 * 2]
 LR = 0.05
-LR_DECAY = 0.001
+LR_DECAY = 0.000
 REGULARIZATION = 0
 # BOX_REGULARIZATION = 0
 # BOX_REGULARIZATION = 1e-7
@@ -57,7 +58,7 @@ BOX_REGULARIZATION = 0.001
 EPOCHS = 501
 NEG_WEIGHT = 0.5
 NEG_RANDOM_WEIGHT = 0.1
-LOSS_TYPE = "distance"
+LOSS_TYPE = "inclusion"
 SCALE_LOSSES = False
 
 # Outputs
@@ -280,11 +281,14 @@ def box_loss_distance(
     def dist_inclusion(sub_c, sub_o, sup_c, sup_o, neg=False):
         n = -1 if neg else 1
         if neg:
-            return (
-                torch.relu(-torch.abs(sub_c - sup_c) + sub_o + sup_o + gamma)
-                .norm(dim=-1)
-                .sum()
-            )
+            # return (
+            #     torch.relu(-torch.abs(sub_c - sup_c) + sub_o + sup_o + gamma)
+            #     .norm(dim=-1)
+            #     .sum()
+            # )
+            v = torch.relu(-torch.abs(sub_c - sup_c) + sub_o + sup_o + gamma)
+            delta = (v > 0).all(dim=-1).float()
+            return (delta * v.norm(dim=-1)).sum()
         else:
             return (
                 torch.relu(torch.abs(sub_c - sup_c) + sub_o - sup_o - gamma)
@@ -413,7 +417,7 @@ LOSS_TYPE: {loss_type}
 REGULARIZATION: {regularization}
 BOX_REGULARIZATION: {box_regularization}
 NEG_WEIGHT: {neg_weight}
-SCALE_LOSSES: {scale_losses}"""
+SCALE_LOSSES: {scale_losses}""", file=sys.stderr, flush=True
     )
     # model = HeteroGNNGAT(GNN_CHANNELS, graph.edge_types, graph.x_dict)
     # model = HeteroGNNSAGE(GNN_CHANNELS, graph.edge_types, graph.x_dict)
@@ -472,24 +476,28 @@ SCALE_LOSSES: {scale_losses}"""
 
             if loss_type == "distance":
                 print(
-                    f"Epoch: {epoch}, total loss: {total_loss:.4g}, pos loss: {pos_loss:.6g}, neg loss: {neg_loss:.6g}, reg: {reg_loss:.3g}"
+                    f"Epoch: {epoch}, total loss: {total_loss:.4g}, pos loss: {pos_loss:.6g}, neg loss: {neg_loss:.6g}, reg: {reg_loss:.3g}", 
+                    file=sys.stderr, flush=True   
                 )
             else:
                 print(
-                    f"Epoch: {epoch}, total loss: {total_loss:.4g}, pos ratio: {pos_ratio:.6g}, neg ratio: {neg_ratio:.6g}, reg: {reg_loss:.8g}"
+                    f"Epoch: {epoch}, total loss: {total_loss:.4g}, pos ratio: {pos_ratio:.6g}, neg ratio: {neg_ratio:.6g}, reg: {reg_loss:.8g}",
+                    file=sys.stderr, flush=True   
                 )
 
             # Backpropagate loss gradients
             loss.backward()
             optimizer.step()
             #
-            if epoch % 1 == 0:
+            # if epoch % 1 == 0:
+            # Only save first and last epoch to save space
+            if epoch == 0 or epoch == epochs - 1:
 
                 if loss_type == "distance":
                     boxes.append(
                         (
                             get_boxes_from_model_and_graph(model, graph)
-                            .data.detach()
+                            .data.detach().cpu()
                             .numpy(),
                             total_loss,
                             pos_loss.detach().item(),
@@ -501,7 +509,7 @@ SCALE_LOSSES: {scale_losses}"""
                     boxes.append(
                         (
                             get_boxes_from_model_and_graph(model, graph)
-                            .data.detach()
+                            .data.detach().cpu()
                             .numpy(),
                             total_loss,
                             pos_ratio.detach().item(),
@@ -517,7 +525,7 @@ SCALE_LOSSES: {scale_losses}"""
             lr = lr * (1 - lr_decay)
 
     except KeyboardInterrupt:
-        print(f"\nTraining stopped by user during Epoch {epoch}")
+        print(f"\nTraining stopped by user during Epoch {epoch}", file=sys.stderr, flush=True)
         boxes = boxes[:last_epoch]
     # print(MinDeltaBoxTensor.from_vector(x_dicts[-1]['classes']).Z)
     # %%
@@ -557,8 +565,9 @@ def plot_boxes_mpl(
             [None, "green", "blue", "purple", "red"],
         )
     )
-    colors = [color_dict.get(v) for v in rev_superclass_dict.values()]
-    colors = ["black" if c == "red" else c for c in colors]
+    # colors = [color_dict.get(v) for v in rev_superclass_dict.values()]
+    # colors = ["black" if c == "red" else c for c in colors]
+    colors = ["black" for v in rev_superclass_dict.values()]
     labels = [
         rev_class_dict.get(k).split("/")[-1] if plot_labels else None
         for k in plot_boxes.keys()
@@ -586,15 +595,18 @@ def plot_boxes_mpl(
             w_list,
             d_list,
             colors,
-            alphas=[
-                1.0 if i < 4 else 0.0 if i < 6 else 0.3 for i in range(len(colors))
-            ],
+            # alphas=[
+            #     1.0 if i < 4 else 0.0 if i < 6 else 0.3 for i in range(len(colors))
+            # ],
+            alphas=[0.3 for i in range(len(colors))],
             draw_labels=True,
-            labels=[l if i < 4 else None for i, l in enumerate(labels)],
-            linewidths=[
-                2.5 if i < 4 else 0.0 if i < 6 else 0.4 for i in range(len(colors))
-            ],
-            color_legend={"purple": "Women", "blue": "Men", "green": "Countries"},
+            # labels=[l if i < 4 else None for i, l in enumerate(labels)],
+            labels=[None for i, l in enumerate(labels)],
+            # linewidths=[
+            #     2.5 if i < 4 else 0.0 if i < 6 else 0.4 for i in range(len(colors))
+            # ],
+            linewidths=[0.4 for i in range(len(colors))],
+            # color_legend={"purple": "Women", "blue": "Men", "green": "Countries"},
             title=f"Box Embeddings - {'Overlap' if loss_type == 'inclusion' else 'Distance'}",
             fig=fig,
             ax=ax,
@@ -650,7 +662,7 @@ LOSS_TYPE: {LOSS_TYPE}
 REGULARIZATION: {REGULARIZATION}
 BOX_REGULARIZATION: {BOX_REGULARIZATION}
 NEG_WEIGHT: {NEG_WEIGHT}
-SCALE_LOSSES: {SCALE_LOSSES}"""
+SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True   
     )
 
     # %%
@@ -670,7 +682,7 @@ SCALE_LOSSES: {SCALE_LOSSES}"""
     sys.stdout = f
 
     #
-    with open(os.path.join(BASE, "datasets/box_graph.pkl"), "rb") as fi:
+    with open(os.path.join(BASE, "datasets/box_graph_all.pkl"), "rb") as fi:
         data = pickle.load(fi)
     graph = data["graph"].to(device)
     rev_class_dict = data["rev_class_dict"]
@@ -680,7 +692,7 @@ SCALE_LOSSES: {SCALE_LOSSES}"""
     gci = {k: {kk: vv.to(device) for kk, vv in v.items()} for k, v in gci.items()}
     # graph['classes'].node_id = torch.arange(len(graph['classes'].x))
     # %%
-    true_classes = set(gci["gci0"]["classes"][:, 1].detach().numpy())
+    true_classes = set(gci["gci0"]["classes"][:, 1].detach().cpu().numpy())
     pprint({k: v for k, v in rev_class_dict.items() if k in true_classes})
 
     # Create an output directory if it doesn't exist
@@ -731,6 +743,16 @@ SCALE_LOSSES: {SCALE_LOSSES}"""
     # Save the model and graph to a pickle file
     with open(os.path.join(output_dir, "box_model.pkl"), "wb") as fo:
         pickle.dump(model, fo)
+
+    # Save first and last boxes
+    with open(os.path.join(output_dir, "boxes_first_last.pkl"), "wb") as fo:
+        pickle.dump(
+            {
+                "first": boxes[0],
+                "last": boxes[-1],
+            },
+            fo,
+        )
     # %%
 
     # Get boxes and losses
@@ -741,7 +763,7 @@ SCALE_LOSSES: {SCALE_LOSSES}"""
 
     plot_classes = set(
         c
-        for c in gci["gci0"]["classes"][:, 1].detach().numpy()
+        for c in gci["gci0"]["classes"][:, 1].detach().cpu().numpy()
         if (
             lambda k: any(
                 [
@@ -756,7 +778,7 @@ SCALE_LOSSES: {SCALE_LOSSES}"""
 
     # Plot last embeddings
     if PLOT_LAST_PRE_GNN:
-        first_boxes = get_initial_boxes_from_model(model, graph).data.detach().numpy()
+        first_boxes = get_initial_boxes_from_model(model, graph).data.detach().cpu().numpy()
         plot_boxes_pre = {i: first_boxes[i, :, :] for i in range(boxes_epochs.shape[1])}
         fig_pre, ax_pre = plot_boxes_mpl(data, rev_class_dict, plot_boxes_pre, BASE)
         fig_pre.savefig(os.path.join(output_dir, "final_boxes_pre_gnn.png"), dpi=300)
@@ -765,7 +787,7 @@ SCALE_LOSSES: {SCALE_LOSSES}"""
 
     if PLOT_LAST:
         plot_boxes = {k: v[-1] for k, v in be_dict.items()}
-        fig, ax = plot_boxes_mpl(data, rev_class_dict, plot_boxes, BASE)
+        fig, ax = plot_boxes_mpl(data, rev_class_dict, plot_boxes, BASE, plot_labels=False)
         fig.savefig(os.path.join(output_dir, "final_boxes.png"), dpi=300)
         fig.savefig(os.path.join(output_dir, "final_boxes.pdf"))
         # plt.close("all")
