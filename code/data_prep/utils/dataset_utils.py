@@ -14,6 +14,10 @@ from rdflib.namespace import OWL, RDF, RDFS
 
 import pyoxigraph as pox
 
+from datetime import datetime
+
+from tqdm.auto import tqdm
+
 USED_GCI = ["gci0", "gci2", "gci1_bot"]
 prefix = """PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -66,27 +70,27 @@ def get_queries(a, b, merged_assertions=True):
 
 
 def get_bots(gci1_bot, i2c, c2i, full_fp, merged_assertions=True):
-    kg_store = pox.Store("/tmp/pyoxigraph_store_bots")
+    kg_store = pox.Store(f"/tmp/pyoxigraph_store_bots-{datetime.now().strftime(format='%Y%m%dT%H%M%S')}")
     kg_store.bulk_load(path=full_fp, format=pox.RdfFormat.TURTLE)
     # kg = rdflib.Graph()
     # kg.parse(full_fp)
     new_bots = set()
-    for i, tensor_pair in enumerate(gci1_bot[:, :2]):
-        print(f"{i} of {len(gci1_bot)} completed...", end="\r")
+    for i, tensor_pair in tqdm(enumerate(gci1_bot[:, :2]), desc="Processing gci1_bot pairs", total=len(gci1_bot)):
+        # print(f"{i} of {len(gci1_bot)} completed...")#, end="\r")
         pair = tuple(sorted(tensor_pair.tolist()))
         if not pair in new_bots:
             a = i2c[pair[0]]
             b = i2c[pair[1]]
 
             queries = get_queries(a, b, merged_assertions=merged_assertions)
-            for q in queries:
+            for q in tqdm(queries, desc=f"Processing queries", leave=False):
                 res = kg_store.query(q)
                 # res = kg.query(q)
-                for r in res:
+                for r in tqdm(res, desc="Processing results", leave=False):
                     bot_pair = tuple(sorted([c2i[str(r[0].value)], c2i[str(r[1].value)]]))
                     # bot_pair = tuple(sorted([c2i[str(r[0])], c2i[str(r[1])]]))
                     new_bots.add(bot_pair)
-        print(f"{i+1} of {len(gci1_bot)} completed...", end="\r")
+        # print(f"{i+1} of {len(gci1_bot)} completed...")#, end="\r")
 
     bot_class = gci1_bot[0, 2].item()
     tensor_bots = th.tensor(list(new_bots), dtype=th.int32)

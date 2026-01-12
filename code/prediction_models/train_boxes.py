@@ -1,5 +1,9 @@
 # %%
 from memory_profiler import profile
+import tracemalloc
+import psutil
+import os
+import gc
 import numpy as np
 from box_embeddings.modules.volume import BesselApproxVolume, HardVolume
 from box_embeddings.modules.intersection import GumbelIntersection, HardIntersection
@@ -13,6 +17,7 @@ from pprint import pprint
 from model import HeteroGNNGAT, HeteroGNNSAGE, OntologyGNN
 import torch
 from torch_geometric import seed_everything
+from torch_geometric.data.hetero_data import HeteroData
 from matplotlib import pyplot as plt
 
 import rdflib
@@ -40,8 +45,8 @@ from boxplot3d import plot_min_delta_boxes_3d_matplotlib
 device = "cuda" if torch.cuda.is_available() else "cpu"
 seed_everything(42)
 torch.manual_seed(42)
-# Enable detect anomaly mode
-torch.autograd.set_detect_anomaly(True)
+# Disable detect anomaly mode (holds computation graphs in memory, major leak source)
+torch.autograd.set_detect_anomaly(False)
 # %%
 
 # %%
@@ -54,15 +59,29 @@ REGULARIZATION = 0
 # BOX_REGULARIZATION = 1e-5
 BOX_REGULARIZATION = 0.001
 # BOX_REGULARIZATION = 1000
-EPOCHS = 501
+EPOCHS = 5
 NEG_WEIGHT = 0.5
 NEG_RANDOM_WEIGHT = 0.1
 LOSS_TYPE = "distance"
 SCALE_LOSSES = False
 
+# from parameters import (EPOCHS, LR, GNN_CHANNELS, NN_CHANNELS, REGULARIZATION,
+#                         TRAIN_EMBEDDING_EPOCH, TRAIN_GENES, BOX_WEIGHT,
+#                         DATASET, BOX_EMBEDDINGS, ONLY_GENE_BOXES, SPLIT,
+#                         SEMANTIC_WEIGHT, MIN_NBR_EDGES, NUM_BATCHES,
+#                         SEMANTIC_MEASURE, DROP_OUT, NEG_WEIGHT,
+#                         INTER_TYPE, VOL_TYPE, RANDOM_INIT_EMBS, EMBEDDING_DIMS, ONLY_BILINEAR, GENE_COMBINE)
+GNN_CHANNELS = [2 * 2]
+
+# GNN_CHANNELS.append(2 * 2) # Final embedding is 2D boxes
+DATASET = 'pyg_graph_box_interactions_DMA30_reduced'
+DATASET = 'box_graph_all_2'
+# DATASET = 'box_graph'
+
+
 # Outputs
 PLOT_LAST_PRE_GNN = False
-PLOT_LAST = True
+PLOT_LAST = False
 ANIMATE = False
 
 
@@ -81,6 +100,46 @@ class TrainingLogger:
         logging.info(f"Epoch {epoch + 1} finished in {elapsed_time:.2f} seconds.")
         logs["epoch_time"] = elapsed_time  # Add epoch time to logs
         self.training_logs.append(logs)  # Collect training logs
+
+
+def get_memory_usage():
+    """Get current memory usage in MB (RSS)."""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / (1024 ** 2)  # Convert to MB
+
+
+def log_memory_stats(label=""):
+    """Log memory statistics with optional label."""
+    mem_mb = get_memory_usage()
+    try:
+        gpu_mem = torch.cuda.memory_allocated() / (1024 ** 2)
+        gpu_reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+        logging.info(f"{label} | RAM: {mem_mb:.1f} MB | GPU allocated: {gpu_mem:.1f} MB | GPU reserved: {gpu_reserved:.1f} MB")
+    except:
+        logging.info(f"{label} | RAM: {mem_mb:.1f} MB")
+    return mem_mb
+
+
+def get_tracemalloc_top(snapshot, num_lines=5):
+    """Get top N allocations from tracemalloc snapshot."""
+    top_stats = snapshot.statistics('lineno')
+    lines = []
+    for stat in top_stats[:num_lines]:
+        lines.append(f"    {stat}")
+    return "\n".join(lines)
+
+
+def log_object_counts(label=""):
+    """Log counts of live Python objects by type."""
+    gc.collect()  # Force garbage collection first
+    obj_counts = {}
+    for obj in gc.get_objects():
+        obj_type = type(obj).__name__
+        obj_counts[obj_type] = obj_counts.get(obj_type, 0) + 1
+    
+    # Show top 5 object types by count
+    sorted_counts = sorted(obj_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    logging.info(f"{label} - Top object types: {sorted_counts}")
 
 
 def box_loss(
@@ -385,7 +444,7 @@ def small_box_penalty(embeddings):
     return loss
 
 
-# @profile
+@profile
 def train_boxes_OntologyGNN(
     graph,
     gci,
@@ -421,7 +480,7 @@ SCALE_LOSSES: {scale_losses}"""
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=regularization)
-    print(sum(p.numel() for p in model.parameters() if p.requires_grad))
+    # print(sum(p.numel() for p in model.parameters() if p.requires_grad))
     # %%
     model.requires_grad_(True)
     model.node_embeddings.requires_grad_(True)
@@ -429,11 +488,16 @@ SCALE_LOSSES: {scale_losses}"""
     boxes = []
     weights = [] if save_weights else None
     last_epoch = 0
+    tracemalloc.start()  # Start memory tracking
+    initial_mem = log_memory_stats("Initial")
+    
     try:
         for epoch in range(epochs):
             optimizer.zero_grad()
-
+            mem_checkpoint_0 = log_memory_stats(f"Epoch {epoch + 1} - after zero_grad")
+            
             x_dicts = model(graph, return_embs=True)
+            mem_checkpoint_1 = log_memory_stats(f"Epoch {epoch + 1} - after forward pass")
             # ^^^ List of dictionaries, one for each layer (inc. initial embeddings)
             # x_dicts = [model(graph, return_embs=False)]
 
@@ -448,10 +512,14 @@ SCALE_LOSSES: {scale_losses}"""
                 neg_random_weight=neg_random_weight,
                 neg_classes_to_skip=neg_classes_to_skip,
             )
+            mem_checkpoint_2 = log_memory_stats(f"Epoch {epoch + 1} - after box_loss")
+            
             if box_regularization > 0.0:
                 reg_loss = small_box_penalty(x_dicts)
             else:
                 reg_loss = torch.tensor(0.0)
+            mem_checkpoint_3 = log_memory_stats(f"Epoch {epoch + 1} - after reg_loss")
+            
             pos_loss_scaled = pos_loss / len(gci["gci0"]["classes"])
             neg_loss_scaled = neg_loss / (
                 3 * len(gci["gci0"]["classes"]) + len(gci["gci1_bot"]["classes"])
@@ -481,7 +549,33 @@ SCALE_LOSSES: {scale_losses}"""
 
             # Backpropagate loss gradients
             loss.backward()
+            mem_checkpoint_4 = log_memory_stats(f"Epoch {epoch + 1} - after backward")
+            
             optimizer.step()
+            mem_checkpoint_5 = log_memory_stats(f"Epoch {epoch + 1} - after step")
+
+            # Clear GPU cache to prevent fragmentation (safe operation)
+            if device == "cuda":
+                torch.cuda.empty_cache()
+
+            # Memory logging every epoch
+            current_mem = log_memory_stats(f"Epoch {epoch + 1} - CLEANUP")
+            mem_growth = current_mem - initial_mem
+            logging.info(f"  Memory growth from start: +{mem_growth:.1f} MB")
+            
+            # Log object counts (top types, may indicate accumulating objects)
+            if epoch % 2 == 0:  # Every 2 epochs to reduce overhead
+                log_object_counts(f"  Epoch {epoch + 1}")
+            
+            # Detect problematic growth (growing >100 MB per epoch may indicate leak)
+            if epoch > 0 and mem_growth > 200:
+                logging.warning(f"  ⚠️  High memory usage detected: {mem_growth:.1f} MB growth")
+                # Log detailed tracemalloc snapshot on high memory usage
+                if tracemalloc.is_tracing():
+                    snapshot = tracemalloc.take_snapshot()
+                    logging.info(f"  Top memory allocations:\n{get_tracemalloc_top(snapshot, num_lines=5)}")
+            
+            sys.stdout.flush()  # Force flush stdout (which is redirected to log file)
             #
             if epoch % 1 == 0:
 
@@ -511,6 +605,14 @@ SCALE_LOSSES: {scale_losses}"""
                     )
                 if save_weights:
                     weights.append(model.state_dict())
+
+            # Explicitly delete large intermediate tensors after they have been used
+            try:
+                del x_dicts, pos_loss, neg_loss, reg_loss, loss, pos_ratio, neg_ratio
+            except Exception:
+                pass
+            gc.collect()
+
             last_epoch = epoch
 
             # decay LR
@@ -670,18 +772,39 @@ SCALE_LOSSES: {SCALE_LOSSES}"""
     sys.stdout = f
 
     #
-    with open(os.path.join(BASE, "datasets/box_graph.pkl"), "rb") as fi:
+    with open(os.path.join(BASE, f"datasets/{DATASET}.pkl"), "rb") as fi:
         data = pickle.load(fi)
-    graph = data["graph"].to(device)
-    rev_class_dict = data["rev_class_dict"]
-    rev_rel_dict = data["rev_rel_dict"]
-    pprint(graph.edge_types)
-    gci = data["gci"]
-    gci = {k: {kk: vv.to(device) for kk, vv in v.items()} for k, v in gci.items()}
+    
+    if isinstance(data, HeteroData):
+        graph = data.to(device)
+        if True:
+            gci0 = {}
+            for n in data.node_types:
+                if n in ['genes', 'root']:
+                    continue
+                with open(os.path.join(BASE, 'datasets/split_datasets/'
+                                        f'collected_{n}.pkl'), 'rb') as fi:
+                    gci0[n] = \
+                        pickle.load(fi).training_datasets.gci0_dataset.data.to(device)
+        else:
+            gci0 = None
+        gci = {
+            "gci0": {"classes": gci0},
+            "gci1_bot": {"classes": gci1_bot},
+        }
+        rev_class_dict = rev_class_dict
+        rev_rel_dict = rev_rel_dict
+    else:
+        graph = data["graph"].to(device)
+        rev_class_dict = data["rev_class_dict"]
+        rev_rel_dict = data["rev_rel_dict"]
+        # pprint(graph.edge_types)
+        gci = data["gci"]
+    gci = {k: {kk: vv for kk, vv in v.items()} for k, v in gci.items()}
     # graph['classes'].node_id = torch.arange(len(graph['classes'].x))
     # %%
     true_classes = set(gci["gci0"]["classes"][:, 1].detach().numpy())
-    pprint({k: v for k, v in rev_class_dict.items() if k in true_classes})
+    # pprint({k: v for k, v in rev_class_dict.items() if k in true_classes})
 
     # Create an output directory if it doesn't exist
     # with current date and time in the directory name
@@ -705,7 +828,7 @@ SCALE_LOSSES: {SCALE_LOSSES}"""
     model, boxes, stop_epoch, weights = train_boxes_OntologyGNN(
         graph,
         gci,
-        save_weights=True,
+        save_weights=False,
         # neg_classes_to_skip=len(true_classes) + 2,
         # lr=lr,
         # lr_decay=dec,
