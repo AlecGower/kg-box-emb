@@ -307,3 +307,8 @@ datasets/box_graph.pkl
 datasets-old
 
 .DS_Store
+mprofile_20260109062444.dat
+*.dat
+*.pkl
+code/scratchpad/
+final_boxes.pdf
