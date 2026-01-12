@@ -33,8 +33,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python -m pip install --upgrade pip setuptools wheel --progress-bar off --no-cache-dir
 
-# Create an unprivileged user for running the app
-RUN useradd --create-home --shell /bin/bash app
+# Create an unprivileged user for running the app with sudo privileges
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends sudo \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /bin/bash --groups sudo app \
+    && echo "app ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 WORKDIR /home/app
 
 # Copy and install python requirements (order helps cache large torch wheel)
