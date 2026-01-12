@@ -1,7 +1,7 @@
 EPOCHS = 300
 LR = 1e-4
 NEIGHBOR_SAMPLE_SIZE = 20
-GNN_CHANNELS = [64, 64]
+GNN_CHANNELS = [64, 32]
 #NN_CHANNELS = [64, 8]
 NN_CHANNELS = [64]
 #NN_CHANNELS = []
@@ -41,4 +41,7 @@ EMBEDDING_DIMS = {
 }
 
 ONLY_BILINEAR = True
-GENE_COMBINE = 'product'  # product, bilinear, concat, intersection
+GENE_COMBINE = 'bilinear'  # product, bilinear, concat, intersection
+#GENE_COMBINE = 'product'  # product, bilinear, concat, intersection
+
+CUSTOM_OGGNN = False
