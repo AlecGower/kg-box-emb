@@ -55,7 +55,7 @@ REGULARIZATION = 0
 # BOX_REGULARIZATION = 1e-5
 BOX_REGULARIZATION = 0.001
 # BOX_REGULARIZATION = 1000
-EPOCHS = 501
+EPOCHS = 11
 NEG_WEIGHT = 0.5
 NEG_RANDOM_WEIGHT = 0.1
 LOSS_TYPE = "inclusion"
@@ -541,7 +541,11 @@ def plot_boxes_mpl(
     ax=None,
     loss_type=LOSS_TYPE,
     plot_labels=True,
+    box_filter=None,
 ):
+
+    plot_boxes = {k: v for k, v in plot_boxes.items() if (box_filter is None or box_filter(k))}
+
     w_list = [t[0, :] for t in plot_boxes.values()]
     d_list = [t[1, :] for t in plot_boxes.values()]
 
@@ -761,33 +765,36 @@ SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True
     # print([[t for t in b[1:]] for b in boxes])
     losses = np.array([b[1:] for b in boxes])
 
-    plot_classes = set(
-        c
-        for c in gci["gci0"]["classes"][:, 1].detach().cpu().numpy()
-        if (
-            lambda k: any(
-                [
-                    k.startswith("http://purl.obolibrary.org/obo/APO"),
-                    k.startswith("http://purl.obolibrary.org/obo/CHEBI"),
-                    k == "http://hypo.project-genesis.io#organismState",
-                ]
-            )
-        )(rev_class_dict[c])
-    )
+    # plot_classes = set(
+    #     c
+    #     for c in gci["gci0"]["classes"][:, 1].detach().cpu().numpy()
+    #     if (
+    #         lambda k: any(
+    #             [
+    #                 k.startswith("http://purl.obolibrary.org/obo/APO"),
+    #                 k.startswith("http://purl.obolibrary.org/obo/CHEBI"),
+    #                 k == "http://hypo.project-genesis.io#organismState",
+    #             ]
+    #         )
+    #     )(rev_class_dict[c])
+    # )
+
+    phen_filter = lambda s: s.find('#APO_') > 0
+
     sys.stdout = sys.__stdout__
 
     # Plot last embeddings
     if PLOT_LAST_PRE_GNN:
         first_boxes = get_initial_boxes_from_model(model, graph).data.detach().cpu().numpy()
         plot_boxes_pre = {i: first_boxes[i, :, :] for i in range(boxes_epochs.shape[1])}
-        fig_pre, ax_pre = plot_boxes_mpl(data, rev_class_dict, plot_boxes_pre, BASE)
+        fig_pre, ax_pre = plot_boxes_mpl(data, rev_class_dict, plot_boxes_pre, BASE, box_filter=phen_filter)
         fig_pre.savefig(os.path.join(output_dir, "final_boxes_pre_gnn.png"), dpi=300)
         fig_pre.savefig(os.path.join(output_dir, "final_boxes_pre_gnn.pdf"))
         # plt.close("all")
 
     if PLOT_LAST:
         plot_boxes = {k: v[-1] for k, v in be_dict.items()}
-        fig, ax = plot_boxes_mpl(data, rev_class_dict, plot_boxes, BASE, plot_labels=False)
+        fig, ax = plot_boxes_mpl(data, rev_class_dict, plot_boxes, BASE, plot_labels=False, box_filter=phen_filter)
         fig.savefig(os.path.join(output_dir, "final_boxes.png"), dpi=300)
         fig.savefig(os.path.join(output_dir, "final_boxes.pdf"))
         # plt.close("all")
