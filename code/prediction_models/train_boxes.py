@@ -544,13 +544,62 @@ def plot_boxes_mpl(
     box_filter=None,
 ):
 
-    plot_boxes = {k: v for k, v in plot_boxes.items() if (box_filter is None or box_filter(k))}
-
-    w_list = [t[0, :] for t in plot_boxes.values()]
-    d_list = [t[1, :] for t in plot_boxes.values()]
 
     g = rdflib.Graph()
     g.parse(os.path.join(base_fp, data["source_ontology"]))
+
+    class_dict = {v: k for k, v in rev_class_dict.items()}
+    
+    filter_query = """
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+SELECT * WHERE {
+?concept rdfs:subClassOf+ obo:APO_0000017 .
+?concept rdfs:label ?label
+}
+"""
+    top_class_query = """
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+SELECT * WHERE {
+?concept rdfs:subClassOf obo:APO_0000017 .
+?concept rdfs:label ?label
+}
+"""
+
+    plot_boxes = {k: v for k, v in plot_boxes.items() if (box_filter is None or box_filter(k))}
+    # Filter boxes to only include the ?concepts from the SPARQL query
+    # noting that the concept will be the uri in the graph, so will need
+    # to use class_dict to get the class index from the uri
+    top_classes = {str(row.concept) : str(row.label) for row in g.query(top_class_query)}
+    phenos = g.query(filter_query)
+    phenos_set = set()
+    color_dict = {}
+    label_dict = {}
+    for row in phenos:
+        phenos_set.add(class_dict.get(str(row.concept)))
+        if str(row.concept) in top_classes:
+            print(f"Phenotype {str(row.label)} is a direct subclass of APO_0000017", file=sys.stderr, flush=True)
+            color_dict[class_dict.get(str(row.concept))] = "green"
+            label_dict[class_dict.get(str(row.concept))] = str(row.label)
+        else:
+            color_dict[class_dict.get(str(row.concept))] = "black"
+            label_dict[class_dict.get(str(row.concept))] = str(row.label)
+
+    plot_boxes = {k: v for k, v in plot_boxes.items() if rev_class_dict.get(k) in phenos_set}
+    print(f"Plotting {len(plot_boxes)} boxes after filtering for phenotypes.", file=sys.stderr, flush=True)
+
+    w_list = [t[0, :] for t in plot_boxes.values()]
+    d_list = [t[1, :] for t in plot_boxes.values()]
+    colors = [color_dict.get(k) for k in plot_boxes.keys()]
+    labels = [label_dict.get(k) for k in plot_boxes.keys()]
+    alphas = [0.3 if c == "black" else 1.0 for c in colors]
+    linewidths = [0.4 if c == "black" else 2.5 for c in colors]
+
     rev_superclass_dict = {}
     for key, sub in rev_class_dict.items():
         q = [
@@ -563,19 +612,20 @@ def plot_boxes_mpl(
         else:
             rev_superclass_dict[key] = q[0][2]
 
-    color_dict = dict(
-        zip(
-            sorted(list(set(rev_superclass_dict.values()))),
-            [None, "green", "blue", "purple", "red"],
-        )
-    )
+    # color_dict = dict(
+    #     zip(
+    #         sorted(list(set(rev_superclass_dict.values()))),
+    #         [None, "green", "blue", "purple", "red"],
+    #     )
+    # )
     # colors = [color_dict.get(v) for v in rev_superclass_dict.values()]
     # colors = ["black" if c == "red" else c for c in colors]
-    colors = ["black" for v in rev_superclass_dict.values()]
-    labels = [
-        rev_class_dict.get(k).split("/")[-1] if plot_labels else None
-        for k in plot_boxes.keys()
-    ]
+    # colors = ["black" for v in rev_superclass_dict.values()]
+    # colors = ["black" for k in plot_boxes.keys()]
+    # labels = [
+    #     rev_class_dict.get(k).split("/")[-1] if plot_labels else None
+    #     for k in plot_boxes.keys()
+    # ]
     if w_list[0].shape == (3,):
         fig, ax = plot_min_delta_boxes_3d_matplotlib(
             w_list,
@@ -602,14 +652,17 @@ def plot_boxes_mpl(
             # alphas=[
             #     1.0 if i < 4 else 0.0 if i < 6 else 0.3 for i in range(len(colors))
             # ],
-            alphas=[0.3 for i in range(len(colors))],
+            # alphas=[0.3 for i in range(len(colors))],
+            alphas=alphas,
             draw_labels=True,
             # labels=[l if i < 4 else None for i, l in enumerate(labels)],
-            labels=[None for i, l in enumerate(labels)],
+            # labels=[None for i, l in enumerate(labels)],
+            labels=labels,
             # linewidths=[
             #     2.5 if i < 4 else 0.0 if i < 6 else 0.4 for i in range(len(colors))
             # ],
-            linewidths=[0.4 for i in range(len(colors))],
+            # linewidths=[0.4 for i in range(len(colors))],
+            linewidths=linewidths,
             # color_legend={"purple": "Women", "blue": "Men", "green": "Countries"},
             title=f"Box Embeddings - {'Overlap' if loss_type == 'inclusion' else 'Distance'}",
             fig=fig,
@@ -779,7 +832,6 @@ SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True
     #     )(rev_class_dict[c])
     # )
 
-    phen_filter = lambda s: s.find('#APO_') > 0
 
     sys.stdout = sys.__stdout__
 
@@ -787,14 +839,14 @@ SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True
     if PLOT_LAST_PRE_GNN:
         first_boxes = get_initial_boxes_from_model(model, graph).data.detach().cpu().numpy()
         plot_boxes_pre = {i: first_boxes[i, :, :] for i in range(boxes_epochs.shape[1])}
-        fig_pre, ax_pre = plot_boxes_mpl(data, rev_class_dict, plot_boxes_pre, BASE, box_filter=phen_filter)
+        fig_pre, ax_pre = plot_boxes_mpl(data, rev_class_dict, plot_boxes_pre, BASE)
         fig_pre.savefig(os.path.join(output_dir, "final_boxes_pre_gnn.png"), dpi=300)
         fig_pre.savefig(os.path.join(output_dir, "final_boxes_pre_gnn.pdf"))
         # plt.close("all")
 
     if PLOT_LAST:
         plot_boxes = {k: v[-1] for k, v in be_dict.items()}
-        fig, ax = plot_boxes_mpl(data, rev_class_dict, plot_boxes, BASE, plot_labels=False, box_filter=phen_filter)
+        fig, ax = plot_boxes_mpl(data, rev_class_dict, plot_boxes, BASE, plot_labels=True)
         fig.savefig(os.path.join(output_dir, "final_boxes.png"), dpi=300)
         fig.savefig(os.path.join(output_dir, "final_boxes.pdf"))
         # plt.close("all")
