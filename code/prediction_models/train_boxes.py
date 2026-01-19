@@ -581,9 +581,9 @@ def plot_boxes_mpl(
     # g.parse(os.path.join(base_fp, "graphs/split_graphs/cell_comp-disjoint.ttl"))
     g.parse(os.path.join(base_fp, "graphs/split_graphs/mol_func-disjoint.ttl"))
     print("Ontology loaded.", file=sys.stderr, flush=True)
-    ROOT = "obo:GO_0005575"
     # ROOT = "obo:APO_0000017"
-    # ROOT = "obo:GO_0003674"
+    # ROOT = "obo:GO_0005575"
+    ROOT = "obo:GO_0003674"
 
     class_dict = {v: k for k, v in rev_class_dict.items()}
 
@@ -624,7 +624,12 @@ ASK {{
     # Filter boxes to only include the ?concepts from the SPARQL query
     # noting that the concept will be the uri in the graph, so will need
     # to use class_dict to get the class index from the uri
-    top_classes = {str(row.concept) : str(row.label) for row in g.query(top_class_query)}
+    top_classes = {str(row.concept) : str(row.label) for row in g.query(top_class_query) if any([kw in str(row.label).lower() for kw in [
+        "molecular function regulator activity",
+        "structural molecule activity",
+        "catalytic activity",
+        "transcription regulator activity"
+    ]])}
     # assign each top class a colour from a matplotlib colormap
     import matplotlib
     cmap = matplotlib.cm.get_cmap('tab10')
