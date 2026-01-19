@@ -9,8 +9,10 @@ from model import HeteroGNNGAT, HeteroGNNSAGE
 import pickle
 import os
 import sys
+print("Python version:", sys.version, file=sys.stderr, flush=True)
 from pprint import pprint
-from model import HeteroGNNGAT, HeteroGNNSAGE, OntologyGNN
+print("Importing models...", file=sys.stderr, flush=True)
+from model import HeteroGNNGAT, HeteroGNNSAGE, HeteroGNNTransformer, OntologyGNN
 import torch
 from torch_geometric import seed_everything
 from matplotlib import pyplot as plt
@@ -47,22 +49,32 @@ torch.autograd.set_detect_anomaly(True)
 
 # %%
 GNN_CHANNELS = [2 * 2]
-LR = 0.05
-LR_DECAY = 0.000
-REGULARIZATION = 0
-# BOX_REGULARIZATION = 0
+# GNN_CHANNELS = [8, 4]
+# GNN_CHANNELS = [24, 4]
+# GNN_CHANNELS = [4, 4, 4, 4]
+BOX_REGULARIZATION = 0
 # BOX_REGULARIZATION = 1e-7
 # BOX_REGULARIZATION = 1e-5
-BOX_REGULARIZATION = 0.001
+# BOX_REGULARIZATION = 0.0001
 # BOX_REGULARIZATION = 1000
-EPOCHS = 11
-NEG_WEIGHT = 0.5
-NEG_RANDOM_WEIGHT = 0.1
-LOSS_TYPE = "inclusion"
+EPOCHS = 500
 SCALE_LOSSES = False
+LOSS_TYPE = "distance"
+LR = 0.1
+LR_DECAY = 0.001
+# LR_DECAY = 0.0
+REGULARIZATION = 0.001
+# REGULARIZATION = 0.00
+# NEG_WEIGHT = 2.0
+NEG_WEIGHT = 0.5
+NEG_RANDOM_WEIGHT = 1.0
+# NEG_RANDOM_WEIGHT = 0.1
+
+# PHENO_LOSS_SCALE = 10000.0
+PHENO_LOSS_SCALE = 1.0
 
 # Outputs
-PLOT_LAST_PRE_GNN = False
+PLOT_LAST_PRE_GNN = True
 PLOT_LAST = True
 ANIMATE = False
 
@@ -98,6 +110,7 @@ def box_loss(
     neg=False,
     neg_random_weight=0.0,
     neg_classes_to_skip=0,
+    pheno_loss_scale=1.0,
     **kwargs,
 ):
     match box_transform:
@@ -120,6 +133,7 @@ def box_loss(
             neg=neg,
             neg_random_weight=neg_random_weight,
             neg_classes_to_skip=neg_classes_to_skip,
+            pheno_loss_scale=pheno_loss_scale,
         )
     if loss_type == "distance":
         return box_loss_distance(
@@ -131,6 +145,7 @@ def box_loss(
             neg=neg,
             neg_random_weight=neg_random_weight,
             neg_classes_to_skip=neg_classes_to_skip,
+            pheno_loss_scale=pheno_loss_scale,
         )
     pass
 
@@ -147,6 +162,7 @@ def box_loss_inclusion(
     neg=False,
     neg_random_weight=0.0,
     neg_classes_to_skip=0,
+    pheno_loss_scale=1.0,
     **kwargs,
 ):
     def neg_loss_func(A, B, volume, intersect, verbose=False):
@@ -205,12 +221,16 @@ def box_loss_inclusion(
 
             if k == "genes":
                 continue
+            if k == "quality":
+                scale_factor = pheno_loss_scale
+            else:
+                scale_factor = 1.0
             box_emb = box.from_vector(emb)
 
             subclasses = box_emb[gci0[k][:, 0], ...]
             supclasses = box_emb[gci0[k][:, 1], ...]
 
-            loss -= (
+            loss -= scale_factor * (
                 (volume(intersect(subclasses, supclasses)) / volume(subclasses))
                 .clamp(min=1e-9, max=1)
                 .log()
@@ -236,7 +256,7 @@ def box_loss_inclusion(
                     device=gci0[k].device,
                 )
                 A = box_emb[rand_classes, ...]
-                neg_loss -= neg_loss_func(A, supclasses, volume, intersect)
+                neg_loss -= scale_factor * neg_loss_func(A, supclasses, volume, intersect)
 
                 rand_classes = torch.randint(
                     low=neg_classes_to_skip,
@@ -245,7 +265,7 @@ def box_loss_inclusion(
                     device=gci0[k].device,
                 )
                 A = box_emb[rand_classes, ...]
-                neg_loss -= neg_loss_func(A, subclasses, volume, intersect)
+                neg_loss -= scale_factor * neg_loss_func(A, subclasses, volume, intersect)
 
                 rand_classes = torch.randint(
                     low=neg_classes_to_skip,
@@ -255,13 +275,13 @@ def box_loss_inclusion(
                 )
                 A = box_emb[rand_classes[:, 0], ...]
                 B = box_emb[rand_classes[:, 1], ...]
-                neg_loss -= neg_loss_func(A, B, volume, intersect)
+                neg_loss -= scale_factor * neg_loss_func(A, B, volume, intersect)
 
             if neg_data:
                 A = box_emb[neg_data[k][:, 0], ...]
                 B = box_emb[neg_data[k][:, 1], ...]
 
-                neg_loss -= neg_loss_func(A, B, volume, intersect, verbose=False)
+                neg_loss -= scale_factor * neg_loss_func(A, B, volume, intersect, verbose=False)
                 # print(f"Neg loss -= {neg_loss_func(A, B, volume, intersect)}")
 
     return loss, neg_loss
@@ -276,6 +296,7 @@ def box_loss_distance(
     neg=False,
     neg_random_weight=0.0,
     neg_classes_to_skip=0,
+    pheno_loss_scale=1.0,
 ):
 
     def dist_inclusion(sub_c, sub_o, sup_c, sup_o, neg=False):
@@ -302,6 +323,10 @@ def box_loss_distance(
         for k, emb in x_dict.items():
             if k == "genes":
                 continue
+            if k == "quality":
+                scale_factor = pheno_loss_scale
+            else:
+                scale_factor = 1.0
             box_emb = box.from_vector(emb)
 
             subclasses = box_emb[gci0[k][:, 0], ...]
@@ -309,7 +334,7 @@ def box_loss_distance(
             supclasses = box_emb[gci0[k][:, 1], ...]
             sup_c, sup_o = supclasses.centre, supclasses.centre - supclasses.z
 
-            loss += dist_inclusion(sub_c, sub_o, sup_c, sup_o, neg=False)
+            loss += scale_factor * dist_inclusion(sub_c, sub_o, sup_c, sup_o, neg=False)
 
             if neg:
                 max_i = len(emb)
@@ -322,7 +347,7 @@ def box_loss_distance(
                 )
                 nsub = box_emb[rand_classes, ...]
                 nsub_c, nsub_o = nsub.centre, nsub.centre - nsub.z
-                neg_loss += neg_random_weight * dist_inclusion(
+                neg_loss += scale_factor * neg_random_weight * dist_inclusion(
                     nsub_c, nsub_o, sup_c, sup_o, neg=True
                 )
 
@@ -334,7 +359,7 @@ def box_loss_distance(
                 )
                 nsup = box_emb[rand_classes, ...]
                 nsup_c, nsup_o = nsup.centre, nsup.centre - nsup.z
-                neg_loss += neg_random_weight * dist_inclusion(
+                neg_loss += scale_factor * neg_random_weight * dist_inclusion(
                     sub_c, sub_o, nsup_c, nsup_o, neg=True
                 )
 
@@ -348,7 +373,7 @@ def box_loss_distance(
                 nsub_c, nsub_o = nsub.centre, nsub.centre - nsub.z
                 nsup = box_emb[rand_classes[:, 1], ...]
                 nsup_c, nsup_o = nsup.centre, nsup.centre - nsup.z
-                neg_loss += neg_random_weight * dist_inclusion(
+                neg_loss += scale_factor * neg_random_weight * dist_inclusion(
                     nsub_c, nsub_o, nsup_c, nsup_o, neg=True
                 )
 
@@ -360,7 +385,7 @@ def box_loss_distance(
                 sup_c = supclasses.centre
                 sup_o = supclasses.centre - supclasses.z
 
-                neg_loss += dist_inclusion(sub_c, sub_o, sup_c, sup_o, neg=True)
+                neg_loss += scale_factor * dist_inclusion(sub_c, sub_o, sup_c, sup_o, neg=True)
 
     return loss, neg_loss
 
@@ -405,6 +430,7 @@ def train_boxes_OntologyGNN(
     scale_losses=SCALE_LOSSES,
     save_weights=False,
     neg_classes_to_skip=0,
+    pheno_loss_scale=1.0,
 ):
     print(
         f"""
@@ -421,11 +447,13 @@ SCALE_LOSSES: {scale_losses}""", file=sys.stderr, flush=True
     )
     # model = HeteroGNNGAT(GNN_CHANNELS, graph.edge_types, graph.x_dict)
     # model = HeteroGNNSAGE(GNN_CHANNELS, graph.edge_types, graph.x_dict)
+    # model = HeteroGNNTransformer(GNN_CHANNELS, graph.edge_types, graph.x_dict)
     model = OntologyGNN(gnn_channels, graph.edge_types, graph.x_dict)
+    print(model, file=sys.stderr, flush=True)
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=regularization)
-    print(sum(p.numel() for p in model.parameters() if p.requires_grad))
+    # print(sum(p.numel() for p in model.parameters() if p.requires_grad))
     # %%
     model.requires_grad_(True)
     model.node_embeddings.requires_grad_(True)
@@ -451,6 +479,7 @@ SCALE_LOSSES: {scale_losses}""", file=sys.stderr, flush=True
                 neg=True,
                 neg_random_weight=neg_random_weight,
                 neg_classes_to_skip=neg_classes_to_skip,
+                pheno_loss_scale=pheno_loss_scale,
             )
             if box_regularization > 0.0:
                 reg_loss = small_box_penalty(x_dicts)
@@ -545,72 +574,132 @@ def plot_boxes_mpl(
 ):
 
 
+    print("Loading ontology for filtering...", file=sys.stderr, flush=True)
     g = rdflib.Graph()
-    g.parse(os.path.join(base_fp, data["source_ontology"]))
+    # g.parse(os.path.join(base_fp, data["source_ontology"]))
+    # g.parse(os.path.join(base_fp, "graphs/split_graphs/quality-disjoint.ttl"))
+    # g.parse(os.path.join(base_fp, "graphs/split_graphs/cell_comp-disjoint.ttl"))
+    g.parse(os.path.join(base_fp, "graphs/split_graphs/mol_func-disjoint.ttl"))
+    print("Ontology loaded.", file=sys.stderr, flush=True)
+    ROOT = "obo:GO_0005575"
+    # ROOT = "obo:APO_0000017"
+    # ROOT = "obo:GO_0003674"
 
     class_dict = {v: k for k, v in rev_class_dict.items()}
-    
-    filter_query = """
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX owl: <http://www.w3.org/2002/07/owl#>
-PREFIX obo: <http://purl.obolibrary.org/obo/>
-SELECT * WHERE {
-?concept rdfs:subClassOf+ obo:APO_0000017 .
-?concept rdfs:label ?label
-}
-"""
-    top_class_query = """
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX owl: <http://www.w3.org/2002/07/owl#>
-PREFIX obo: <http://purl.obolibrary.org/obo/>
-SELECT * WHERE {
-?concept rdfs:subClassOf obo:APO_0000017 .
-?concept rdfs:label ?label
-}
-"""
 
-    plot_boxes = {k: v for k, v in plot_boxes.items() if (box_filter is None or box_filter(k))}
+    
+    filter_query = f"""
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+SELECT * WHERE {{
+?concept rdfs:subClassOf* ?top .
+?top rdfs:subClassOf {ROOT} .
+OPTIONAL {{ ?concept rdfs:label ?label }}
+}}
+""".strip()
+    top_class_query = f"""
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+SELECT * WHERE {{
+?concept rdfs:subClassOf {ROOT} .
+OPTIONAL {{ ?concept rdfs:label ?label }}
+}}
+""".strip()
+    ancestor_query = """
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX obo: <http://purl.obolibrary.org/obo/>
+ASK {{
+  <{}> rdfs:subClassOf+ <{}> .
+}}
+""".strip()
+
+    # plot_boxes = {k: v for k, v in plot_boxes.items() if (box_filter is None or box_filter(k))}
+    
     # Filter boxes to only include the ?concepts from the SPARQL query
     # noting that the concept will be the uri in the graph, so will need
     # to use class_dict to get the class index from the uri
     top_classes = {str(row.concept) : str(row.label) for row in g.query(top_class_query)}
-    phenos = g.query(filter_query)
-    phenos_set = set()
+    # assign each top class a colour from a matplotlib colormap
+    import matplotlib
+    cmap = matplotlib.cm.get_cmap('tab10')
+    top_class_colors = {}
+    for i, uri in enumerate(top_classes.keys()):
+        top_class_colors[uri] = matplotlib.colors.rgb2hex(cmap(i % 10))
+    plot_cls = g.query(filter_query)
+    plot_cls_set = set()
     color_dict = {}
     label_dict = {}
-    for row in phenos:
-        phenos_set.add(class_dict.get(str(row.concept)))
+    for row in plot_cls:
+        plot_cls_set.add(class_dict.get(str(row.concept)))
         if str(row.concept) in top_classes:
-            print(f"Phenotype {str(row.label)} is a direct subclass of APO_0000017", file=sys.stderr, flush=True)
-            color_dict[class_dict.get(str(row.concept))] = "green"
-            label_dict[class_dict.get(str(row.concept))] = str(row.label)
-        else:
+            # print(f"Class {str(row.label)} is a direct subclass of {ROOT}", file=sys.stderr, flush=True)
             color_dict[class_dict.get(str(row.concept))] = "black"
             label_dict[class_dict.get(str(row.concept))] = str(row.label)
+        else:
+            # print(f"Class {str(row.label)} is subclass of {str(row.top)}, a deeper subclass of {ROOT}", file=sys.stderr, flush=True)
+            color_dict[class_dict.get(str(row.concept))] = top_class_colors.get(str(row.top))
+            label_dict[class_dict.get(str(row.concept))] = None
 
-    plot_boxes = {k: v for k, v in plot_boxes.items() if rev_class_dict.get(k) in phenos_set}
-    print(f"Plotting {len(plot_boxes)} boxes after filtering for phenotypes.", file=sys.stderr, flush=True)
+    
+
+    # From file instead
+    # with open(os.path.join(base_fp, "top_classes.csv"), "r") as fi:
+    #     top_classes = {line.split(";")[1]: line.split(";")[2].strip() for line in fi.readlines()}
+    # with open(os.path.join(base_fp, "phenotypes.csv"), "r") as fi:
+    #     phenotypes = [line.strip().split(";") for line in fi.readlines()]
+
+    # for p in phenotypes:
+    #     p[0] = int(p[0])
+
+    # phenos_set = set()
+    # color_dict = {}
+    # label_dict = {}
+    # for pheno_class_id, pheno_uri, pheno_label in phenotypes:
+    #     phenos_set.add(pheno_class_id)
+    #     if pheno_uri in top_classes:
+    #         print(f"Phenotype {pheno_label} is a direct subclass of APO_0000017", file=sys.stderr, flush=True)
+    #         color_dict[pheno_class_id] = "green"
+    #         label_dict[pheno_class_id] = pheno_label
+    #     else:
+    #         print(f"Phenotype {pheno_label} is a deeper subclass of APO_0000017", file=sys.stderr, flush=True)
+    #         color_dict[pheno_class_id] = "black"
+    #         label_dict[pheno_class_id] = None
+
+    # # Print out the phehnotypes being plotted and the top classes
+    # print(f"Phenotypes to be plotted ({len(plot_cls_set)}):", file=sys.stderr, flush=True)
+    # for c in plot_cls_set:
+    #     print(f"{c};{rev_class_dict.get(c)};{label_dict.get(c)}", file=sys.stderr, flush=True)
+    # print(f"Top-level classes ({len(top_classes)}):", file=sys.stderr, flush=True)
+    # for uri, label in top_classes.items():
+    #     print(f"{class_dict.get(uri)};{uri};{label}", file=sys.stderr, flush=True)
+
+    plot_boxes = {k: v for k, v in plot_boxes.items() if k in plot_cls_set}
+    print(f"Plotting {len(plot_boxes)} boxes after filtering for classes under root {ROOT}.", file=sys.stderr, flush=True)
 
     w_list = [t[0, :] for t in plot_boxes.values()]
     d_list = [t[1, :] for t in plot_boxes.values()]
     colors = [color_dict.get(k) for k in plot_boxes.keys()]
     labels = [label_dict.get(k) for k in plot_boxes.keys()]
-    alphas = [0.3 if c == "black" else 1.0 for c in colors]
-    linewidths = [0.4 if c == "black" else 2.5 for c in colors]
+    alphas = [0.2 if c != "black" else 0.8 for c in colors]
+    linewidths = [0.4 if c != "black" else 1.6 for c in colors]
 
-    rev_superclass_dict = {}
-    for key, sub in rev_class_dict.items():
-        q = [
-            t
-            for t in g.triples((rdflib.URIRef(sub), RDF.type, None))
-            if t[2] != rdflib.URIRef("http://www.w3.org/2002/07/owl#NamedIndividual")
-        ]
-        if len(q) == 0:
-            rev_superclass_dict[key] = None
-        else:
-            rev_superclass_dict[key] = q[0][2]
+    # rev_superclass_dict = {}
+    # for key, sub in rev_class_dict.items():
+    #     q = [
+    #         t
+    #         for t in g.triples((rdflib.URIRef(sub), RDF.type, None))
+    #         if t[2] != rdflib.URIRef("http://www.w3.org/2002/07/owl#NamedIndividual")
+    #     ]
+    #     if len(q) == 0:
+    #         rev_superclass_dict[key] = None
+    #     else:
+    #         rev_superclass_dict[key] = q[0][2]
 
     # color_dict = dict(
     #     zip(
@@ -626,7 +715,9 @@ SELECT * WHERE {
     #     rev_class_dict.get(k).split("/")[-1] if plot_labels else None
     #     for k in plot_boxes.keys()
     # ]
+    print({f"Box shape: {w_list[0].shape}"}, file=sys.stderr, flush=True)
     if w_list[0].shape == (3,):
+        print("Plotting 3D boxes...", file=sys.stderr, flush=True)
         fig, ax = plot_min_delta_boxes_3d_matplotlib(
             w_list,
             d_list,
@@ -645,6 +736,7 @@ SELECT * WHERE {
             ax=ax,
         )
     elif w_list[0].shape == (2,):
+        print("Plotting 2D boxes...", file=sys.stderr, flush=True)
         fig, ax = plot_min_delta_boxes_2d_matplotlib(
             w_list,
             d_list,
@@ -658,16 +750,21 @@ SELECT * WHERE {
             # labels=[l if i < 4 else None for i, l in enumerate(labels)],
             # labels=[None for i, l in enumerate(labels)],
             labels=labels,
+            label_fontsize=6,
             # linewidths=[
             #     2.5 if i < 4 else 0.0 if i < 6 else 0.4 for i in range(len(colors))
             # ],
             # linewidths=[0.4 for i in range(len(colors))],
             linewidths=linewidths,
             # color_legend={"purple": "Women", "blue": "Men", "green": "Countries"},
+            # Add a legend for the top-level classes and make it small and just outside the plot
+            color_legend={v: top_classes.get(k) for k, v in top_class_colors.items()},
             title=f"Box Embeddings - {'Overlap' if loss_type == 'inclusion' else 'Distance'}",
             fig=fig,
             ax=ax,
         )
+        # set equal aspect ratio
+        ax.set_aspect('equal', adjustable='box')
     else:
         raise NotImplementedError(
             "Plots for dimensions other than 2 or 3 not implemented."
@@ -677,6 +774,8 @@ SELECT * WHERE {
 
 
 if __name__ == "__main__":
+
+    print("Starting training...", file=sys.stderr, flush=True)
 
     lrs = [1e-2, 1e-1, 1e0]
     # lrs = [1e-1]
@@ -731,32 +830,58 @@ SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True
         BASE,
         "trained_models",
         # "hyperparam_search",
-        f"{LOSS_TYPE}_loss__lr_{LR}_lr_dec_{LR_DECAY}_boxreg_{BOX_REGULARIZATION}_neg_{NEG_WEIGHT}_negrand_{NEG_RANDOM_WEIGHT}_scale_{SCALE_LOSSES}_{now.strftime('%Y%m%d_%H%M%S')}",
+        f"{LOSS_TYPE}_loss__lr_{LR}_lr_dec_{LR_DECAY}_reg_{REGULARIZATION}_boxreg_{BOX_REGULARIZATION}_neg_{NEG_WEIGHT}_negrand_{NEG_RANDOM_WEIGHT}_scale_{SCALE_LOSSES}_{now.strftime('%Y%m%d_%H%M%S')}",
     )
     os.makedirs(output_dir, exist_ok=True)
     orig_stdout = sys.stdout
     f = open(os.path.join(output_dir, "log.txt"), "w")
-    sys.stdout = f
+    # Output stdout to log file but also to console
+    class Tee(object):
+        def __init__(self, *files):
+            self.files = files
+
+        def write(self, obj):
+            for f in self.files:
+                f.write(obj)
+                f.flush()  # If you want the output to be visible immediately
+
+        def flush(self):
+            for f in self.files:
+                f.flush()
+
+    # sys.stdout = f
+    sys.stdout = Tee(sys.stdout, f)
 
     #
-    with open(os.path.join(BASE, "datasets/box_graph_all.pkl"), "rb") as fi:
+    # with open(os.path.join(BASE, "datasets/box_graph_all.pkl"), "rb") as fi:
+    # with open(os.path.join(BASE, "datasets/box_graph_all_disjoint_quality.pkl"), "rb") as fi:
+    # with open(os.path.join(BASE, "datasets/box_graph_all_disjoint_cell_comp.pkl"), "rb") as fi:
+    with open(os.path.join(BASE, "datasets/box_graph_all_disjoint_mol_func.pkl"), "rb") as fi:
         data = pickle.load(fi)
+
+    pheno = [
+        k for k,v in data['rev_class_dict'].items() 
+        if v.startswith("http://purl.obolibrary.org/obo/APO_") 
+        or v.startswith("http://sgd-kg.project-genesis.io#APO_")
+    ]
+
     graph = data["graph"].to(device)
     rev_class_dict = data["rev_class_dict"]
     rev_rel_dict = data["rev_rel_dict"]
-    pprint(graph.edge_types)
+    # pprint(graph.edge_types)
     gci = data["gci"]
     gci = {k: {kk: vv.to(device) for kk, vv in v.items()} for k, v in gci.items()}
     # graph['classes'].node_id = torch.arange(len(graph['classes'].x))
     # %%
     true_classes = set(gci["gci0"]["classes"][:, 1].detach().cpu().numpy())
-    pprint({k: v for k, v in rev_class_dict.items() if k in true_classes})
+    # pprint({k: v for k, v in rev_class_dict.items() if k in true_classes})
 
     # Create an output directory if it doesn't exist
     # with current date and time in the directory name
 
     # Save the hyperparameters and training information to a text file
     with open(os.path.join(output_dir, "training_info.txt"), "w") as fo:
+        fo.write(f"SLURM JOB ID: {os.getenv('SLURM_JOB_ID')}\n")
         fo.write(f"Ontology source: {data['source_ontology']}\n")
         fo.write(f"Loss type: {LOSS_TYPE}\n")
         fo.write(f"Epochs: {EPOCHS}\n")
@@ -767,6 +892,7 @@ SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True
         fo.write(f"Negative weight: {NEG_WEIGHT}\n")
         fo.write(f"Negative (Random) weight: {NEG_RANDOM_WEIGHT}\n")
         fo.write(f"Losses scaled (pos. and neg.): {SCALE_LOSSES}\n")
+        fo.write(f"Phenotype losses scaled by factor: {PHENO_LOSS_SCALE}\n")
         fo.write(f"Model channels: {GNN_CHANNELS}\n")
         fo.write(f"Training started at: {now.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
@@ -783,12 +909,18 @@ SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True
         # neg_weight=neg,
         # neg_random_weight=neg_rand,
         # scale_losses=scale,
+        pheno_loss_scale=PHENO_LOSS_SCALE
     )
 
+    with open(os.path.join(output_dir, "training_info.txt"), "a") as fo:
+        fo.write(f"Training ended at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
     model.to("cpu")
+    graph.to("cpu")
 
     with open(os.path.join(output_dir, "training_info.txt"), "a") as fo:
         fo.write(f"Model: {model.__class__.__name__}\n")
+        fo.write(f"Model GNN type: {model.gnn.__class__.__name__}\n")
         fo.write(
             f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}\n"
         )
@@ -807,6 +939,8 @@ SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True
             {
                 "first": boxes[0],
                 "last": boxes[-1],
+                "rev_class_dict": rev_class_dict,
+                "rev_rel_dict": rev_rel_dict,
             },
             fo,
         )
@@ -838,17 +972,29 @@ SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True
     # Plot last embeddings
     if PLOT_LAST_PRE_GNN:
         first_boxes = get_initial_boxes_from_model(model, graph).data.detach().cpu().numpy()
+        print(f"Plotting {len(first_boxes)} pre-GNN boxes.", file=sys.stderr, flush=True)
         plot_boxes_pre = {i: first_boxes[i, :, :] for i in range(boxes_epochs.shape[1])}
-        fig_pre, ax_pre = plot_boxes_mpl(data, rev_class_dict, plot_boxes_pre, BASE)
-        fig_pre.savefig(os.path.join(output_dir, "final_boxes_pre_gnn.png"), dpi=300)
-        fig_pre.savefig(os.path.join(output_dir, "final_boxes_pre_gnn.pdf"))
+        fig_pre, ax_pre = plot_boxes_mpl(data, rev_class_dict, plot_boxes_pre, BASE, plot_labels=True)
+        print("Saving final boxes plot (pre-GNN) (PNG)...", file=sys.stderr, flush=True)
+        fig_pre.savefig(os.path.join(output_dir, "final_boxes_pre_gnn.png"), bbox_inches='tight', dpi=300)
+        print("Saving final boxes plot (pre-GNN) (PDF)...", file=sys.stderr, flush=True)
+        fig_pre.savefig(os.path.join(output_dir, "final_boxes_pre_gnn.pdf"), bbox_inches='tight')
+        print("Saving final boxes plot (pre-GNN) as matplotlib figure for potential future use...", file=sys.stderr, flush=True)
+        with open(os.path.join(output_dir, "final_boxes_fig_ax_pre.pkl"), "wb") as fo:
+            pickle.dump((fig_pre, ax_pre), fo)  
         # plt.close("all")
 
     if PLOT_LAST:
         plot_boxes = {k: v[-1] for k, v in be_dict.items()}
+        print(f"Plotting {len(plot_boxes)} post-GNN boxes.", file=sys.stderr, flush=True)
         fig, ax = plot_boxes_mpl(data, rev_class_dict, plot_boxes, BASE, plot_labels=True)
-        fig.savefig(os.path.join(output_dir, "final_boxes.png"), dpi=300)
-        fig.savefig(os.path.join(output_dir, "final_boxes.pdf"))
+        print("Saving final boxes plot (post-GNN) (PNG)...", file=sys.stderr, flush=True)
+        fig.savefig(os.path.join(output_dir, "final_boxes.png"), bbox_inches='tight', dpi=300)
+        print("Saving final boxes plot (post-GNN) (PDF)...", file=sys.stderr, flush=True)
+        fig.savefig(os.path.join(output_dir, "final_boxes.pdf"), bbox_inches='tight')
+        print("Saving final boxes plot (post-GNN) as matplotlib figure for potential future use...", file=sys.stderr, flush=True)
+        with open(os.path.join(output_dir, "final_boxes_fig_ax_post.pkl"), "wb") as fo:
+            pickle.dump((fig, ax), fo)  
         # plt.close("all")
 
     if ANIMATE:
@@ -865,10 +1011,10 @@ SCALE_LOSSES: {SCALE_LOSSES}""", file=sys.stderr, flush=True
             box_label_filter=lambda k: k in true_classes,
             # box_label_filter=lambda k: k in plot_classes
         )
-        # except Exception as e:
-        #     print(traceback.format_exc(), file=sys.stderr)
-        # finally:
-        #     f.close()
-        #     sys.stdout = orig_stdout
+    # except Exception as e:
+    #     print(traceback.format_exc(), file=sys.stderr)
+    # finally:
+    f.close()
+    sys.stdout = orig_stdout
 
     # plt.close("all")

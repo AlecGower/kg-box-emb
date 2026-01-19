@@ -10,6 +10,8 @@ import torch_geometric.transforms as T
 
 from argparse import ArgumentParser
 
+from datetime import datetime
+
 # Argument for the dataset path
 parser = ArgumentParser()
 parser.add_argument(
@@ -70,7 +72,7 @@ for r, v in rel_data.items():
 data = T.ToUndirected(merge=False)(data)
 # %%
 
-with open(os.path.join(BASE, "datasets/box_graph.pkl"), "wb") as fo:
+with open(os.path.join(BASE, f"datasets/box_graph_{os.path.basename(ontology_path)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"), "wb") as fo:
     pickle.dump(
         {
             "source_ontology": ontology_path,

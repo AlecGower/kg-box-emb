@@ -31,14 +31,15 @@ MAX_EDGE_TYPES = -1  # Set to -1 for all edge types
 BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # GNN_CHANNELS = [16, 16]
 GNN_CHANNELS = [64]
+# GNN_CHANNELS = [24]
 # GNN_CHANNELS = [2 * 2]
 LR = 0.05
 LR_DECAY = 0.000
-REGULARIZATION = 0
+REGULARIZATION = 0.001
 BOX_REGULARIZATION = 0.000
-EPOCHS = 600
+EPOCHS = 500
 NEG_WEIGHT = 0.5
-NEG_RANDOM_WEIGHT = 0.1
+NEG_RANDOM_WEIGHT = 1.0
 LOSS_TYPE = "inclusion"
 SCALE_LOSSES = False
 
@@ -259,13 +260,22 @@ if __name__ == "__main__":
 
     # Pseudocode  (filled in)
     # 1. Split graph into train, G:=(V,E) and test, G':=(V,E')
-    G_train, G_test = graph_train_test_split(G)
+    G_train, G_test = graph_train_test_split(G, ratio=0.8)
+
+    # Save these for use with other models
+    with open(os.path.join(output_dir, "G_train.pkl"), "wb") as fo:
+        pickle.dump(G_train.cpu(), fo)
+    with open(os.path.join(output_dir, "G_test.pkl"), "wb") as fo:
+        pickle.dump(G_test.cpu(), fo)
+    G_train = G_train.to(DEVICE)
+    G_test = G_test.to(DEVICE)
 
     # 2. Train embedding parameters using G
     print("Training base model using G_train...", file=sys.stderr)
     model, boxes, stop_epoch, weights = train_and_save_model(
         G_train, gci, true_classes, output_dir
     )
+
     # Ensure model is on the same device as the graph to avoid device mismatch errors
     try:
         model.to(DEVICE)
@@ -445,3 +455,5 @@ if __name__ == "__main__":
             },
             fo,
         )
+
+    # Save the 

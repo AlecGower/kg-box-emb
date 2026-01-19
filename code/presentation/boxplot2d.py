@@ -8,6 +8,8 @@ import plotly.graph_objects as go
 import numpy as np
 from pprint import pprint
 
+from tqdm.auto import tqdm
+
 FPS = 25
 KEY_FRAME_INTERVAL = 40  # ms per key frame
 FRAME_LENGTH = KEY_FRAME_INTERVAL / FPS
@@ -142,9 +144,11 @@ def plot_min_delta_boxes_2d_matplotlib(
     linewidths=None,
     draw_labels=False,
     labels=None,
+    label_fontsize=None,
     title="Box Embeddings",
     fig=None,
     ax=None,
+    **kwargs
 ):
     """
     Plot multiple boxes given lists of lower left corners (w_list) and widths/heights (d_list) using matplotlib.
@@ -164,9 +168,9 @@ def plot_min_delta_boxes_2d_matplotlib(
     if linewidths is None:
         linewidths = map(lambda a: 2 * a, alphas)
 
-    for w, d, label, color, alpha, lw in zip(
+    for w, d, label, color, alpha, lw in tqdm(zip(
         w_list, d_list, labels, colors, alphas, linewidths
-    ):
+    )):
         lower_left = w
         upper_right = w + softplus(d)
         width = upper_right[0] - lower_left[0]
@@ -193,7 +197,7 @@ def plot_min_delta_boxes_2d_matplotlib(
                 label,
                 ha="left",
                 va="center",
-                fontsize=10,
+                fontsize=10 if label_fontsize is None else label_fontsize,
                 color="black",
                 bbox=dict(
                     facecolor="white",
@@ -205,10 +209,12 @@ def plot_min_delta_boxes_2d_matplotlib(
             )
 
     ax.set_aspect("equal")
-    ax.set_title(title)
-    ax.set_xlabel("Dimension 1")
-    ax.set_ylabel("Dimension 2")
+    # ax.set_title(title)
+    # ax.set_xlabel("Dimension 1")
+    # ax.set_ylabel("Dimension 2")
     ax.grid(True)
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
 
     # Optionally, auto-scale axes to fit all boxes
     all_x = [w[0] for w in w_list] + [
@@ -234,6 +240,8 @@ def plot_min_delta_boxes_2d_matplotlib(
         plt.legend(
             handles=[Patch(color=k, label=v) for k, v in color_legend.items()],
             loc="upper right",
+            fontsize='small',
+            # bbox_to_anchor=(1.35, 1)
         ).set_zorder(99)
 
     return fig, ax
@@ -245,6 +253,7 @@ def plot_min_delta_boxes_2d_plotly(
     colors=None,
     draw_labels=False,
     labels=None,
+    label_fontsize=None,
     fig=None,
     edge_points=50,
 ):
